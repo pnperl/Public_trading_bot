@@ -64,12 +64,21 @@ SYMBOLS = [
     "RELIANCE.NS",
     "HDFCBANK.NS",
     # ── Uncomment to add more ──
-    # "BTC-USD",
-    # "ETH-USD",
+    "BTC-USD",
+    "ETH-USD",
     # "GOLD.MCX",
     # "CRUDEOIL.MCX",
     # "AAPL",
     # "TSLA",
+    "CL=F",
+    "^CNXCMDT", #(NIFTY COMMODITIES) 
+    "MCX.NS", #(Multi Commodity Exchange of India Ltd)
+    "CL=F", #(WTI Crude Future)
+    "GC=F", #(Gold Future)
+    "SI=F", #(Silver Future)
+    "NG=F", #(Natural Gas Future)
+    "HG=F", #(Copper Future)
+    "INR=X", #(USD/INR)
 ]
 
 INTERVAL          = "5m"   # candle size — do not change unless testing
