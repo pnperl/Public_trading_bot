@@ -1,41 +1,31 @@
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║         TRADING BOT — WORKS IN COLAB & GITHUB ACTIONS           ║
+# ║         TRADING BOT — GITHUB ACTIONS / TERMINAL                 ║
 # ║                                                                  ║
-# ║  HOW TO USE IN COLAB:                                            ║
-# ║    1. Run Cell 1 (install packages)                              ║
-# ║    2. Add TELEGRAM_TOKEN and CHAT_ID in Colab 🔑 Secrets panel   ║
-# ║    3. Run Cell 2 (bot starts)                                    ║
-# ║                                                                  ║
-# ║  HOW TO USE ON GITHUB ACTIONS:                                   ║
-# ║    1. Upload this file + requirements.txt to GitHub repo         ║
-# ║    2. Add TELEGRAM_TOKEN and CHAT_ID in GitHub Secrets           ║
+# ║  SETUP:                                                          ║
+# ║    1. Upload this file + requirements.txt to GitHub (public repo)║
+# ║    2. Add TELEGRAM_TOKEN and CHAT_ID in GitHub → Settings →      ║
+# ║       Secrets and variables → Actions                            ║
 # ║    3. Create .github/workflows/run_bot.yml (see bottom of file)  ║
+# ║    4. Push — bot auto-runs 9 AM–3 PM IST every weekday           ║
 # ║                                                                  ║
-# ║  ✏️  ONLY EDIT THE SETTINGS SECTION — nothing else               ║
+# ║  ✏️  ONLY EDIT THE SETTINGS SECTION BELOW                        ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
-# ════════════════════════════════════════════════════════════════════
-# CELL 1 — Run this first in Colab (skip if using GitHub Actions)
-# ════════════════════════════════════════════════════════════════════
-# !pip install yfinance pandas numpy requests python-dotenv -q
-
-
-# ════════════════════════════════════════════════════════════════════
-# CELL 2 — Paste everything below and run
-# ════════════════════════════════════════════════════════════════════
-
 import os
+import gc
 import time
 import logging
 import requests
-import numpy as np
+import numpy  as np
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-from dotenv import load_dotenv
 
-# ── Works in both Colab and GitHub Actions automatically ─────────────
+from datetime        import datetime, timedelta
+from zoneinfo        import ZoneInfo
+from dotenv          import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ── Secrets ──────────────────────────────────────────────────────────
 load_dotenv()
 try:
     from google.colab import userdata
@@ -47,11 +37,13 @@ except ImportError:
     TOKEN    = os.getenv("TELEGRAM_TOKEN")
     CHAT_ID  = os.getenv("CHAT_ID")
     IN_COLAB = False
-
     def clear_output(wait=False):
-        print("\n" + "═" * 80 + "\n")
+        print("\n" + "═" * 90)
 
 logging.basicConfig(level=logging.WARNING)
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+logging.getLogger("peewee").setLevel(logging.CRITICAL)
+
 IST = ZoneInfo("Asia/Kolkata")
 
 
@@ -60,40 +52,78 @@ IST = ZoneInfo("Asia/Kolkata")
 # ════════════════════════════════════════════════════════════════════
 
 SYMBOLS = [
-    "^NSEI",
+    # ── Indian Indices ──────────────────────────────────────────
+    "^NSEI",           # NIFTY 50
+    "^CNXCMDT",        # NIFTY Commodities Index
+
+    # ── Indian Stocks ───────────────────────────────────────────
     "RELIANCE.NS",
     "HDFCBANK.NS",
-    # ── Uncomment to add more ──
+    "MCX.NS",          # Multi Commodity Exchange stock
+
+    # ── Global Commodity Futures ────────────────────────────────
+    "GC=F",            # Gold
+    "SI=F",            # Silver
+    "CL=F",            # WTI Crude Oil
+    "NG=F",            # Natural Gas
+    "HG=F",            # Copper
+
+    # ── Crypto ──────────────────────────────────────────────────
     "BTC-USD",
     "ETH-USD",
-    # "GOLD.MCX",
-    # "CRUDEOIL.MCX",
+
+    # ── Forex ───────────────────────────────────────────────────
+    "INR=X",           # USD/INR
+
+    # ── Uncomment to add ────────────────────────────────────────
     # "AAPL",
     # "TSLA",
-    "CL=F",
-    "^CNXCMDT", #(NIFTY COMMODITIES) 
-    "MCX.NS", #(Multi Commodity Exchange of India Ltd)
-    "CL=F", #(WTI Crude Future)
-    "GC=F", #(Gold Future)
-    "SI=F", #(Silver Future)
-    "NG=F", #(Natural Gas Future)
-    "HG=F", #(Copper Future)
-    "INR=X", #(USD/INR)
+    # "SOL-USD",
 ]
 
-INTERVAL          = "5m"   # candle size — do not change unless testing
-MIN_PROBABILITY   = 55     # 0-100. Raise to 65-70 to reduce false signals
-ATR_SL_MULTIPLIER = 1.5    # stop loss width. Try 2.0 if hitting SL too often
-TP_THRESHOLD      = 0.03   # 3% take profit. Change to 0.02 for 2% etc.
-MAX_DAILY_LOSS    = 3      # pause a symbol after this many losses in one day
+INTERVAL          = "5m"   # candle size — do not change
+MIN_PROBABILITY   = 55     # 0–100. Raise to reduce signals, lower to increase.
+ATR_SL_MULTIPLIER = 1.5    # SL width. Try 2.0 if SL hits too often.
+TP_THRESHOLD      = 0.03   # 3% take profit
+MAX_DAILY_LOSS    = 3      # pause symbol after N losses in one day
+
+# ── Parallel fetch settings ─────────────────────────────────────────
+# MAX_WORKERS: how many symbols fetch simultaneously
+# Rule of thumb: Yahoo Finance allows ~5-8 parallel requests safely.
+# DO NOT raise above 8 — causes 429 rate limit errors.
+MAX_WORKERS       = 5
 
 # ════════════════════════════════════════════════════════════════════
 
 
 # ────────────────────────────────────────────────────────────────────
-# AUTO-DETECT PROFILE
-# Reads the symbol name and automatically sets timezone, market hours,
-# doji sensitivity, and strike rounding. You never need to edit this.
+# HOW PARALLEL FETCHING WORKS
+# ────────────────────────────────────────────────────────────────────
+#
+#  OLD (sequential — slow):
+#  Symbol 1 ──fetch──► 3s
+#                       Symbol 2 ──fetch──► 3s
+#                                            Symbol 3 ──fetch──► 3s
+#  Total: 3s × 14 symbols = 42s delay
+#
+#  NEW (parallel — fast):
+#  Symbol 1 ──fetch──►|
+#  Symbol 2 ──fetch──►| all running simultaneously
+#  Symbol 3 ──fetch──►|
+#  ...                 |
+#  Symbol 5 ──fetch──►|
+#                      ↓ done in ~3-5s total (slowest one wins)
+#  Then next batch of 5 starts immediately
+#
+#  Total: ~6-10s for 14 symbols instead of 42s
+#  Signal latency: near-zero — all symbols processed within seconds
+#  Rate limit safe: max 5 at a time, well under Yahoo's limit
+#
+# ────────────────────────────────────────────────────────────────────
+
+
+# ────────────────────────────────────────────────────────────────────
+# SYMBOL PROFILES
 # ────────────────────────────────────────────────────────────────────
 
 def detect_profile(symbol: str) -> dict:
@@ -101,53 +131,43 @@ def detect_profile(symbol: str) -> dict:
     CRYPTO_KW = ["BTC","ETH","BNB","SOL","XRP","DOGE","ADA","MATIC","AVAX"]
 
     if any(k in s for k in CRYPTO_KW) or s.endswith("-USD"):
-        price = _quick_price(symbol)
-        if   price and price > 10_000: strike = 500
-        elif price and price > 1_000:  strike = 50
-        else:                           strike = 1
         return dict(type="CRYPTO",   tz="UTC",
-                    hours=None,               doji=0.15, strike=strike)
+                    hours=None,              doji=0.15, strike=1,  label="Crypto")
+
+    if s.endswith("=F"):
+        return dict(type="FUTURES",  tz="America/New_York",
+                    hours=None,              doji=0.18, strike=1,  label="Futures")
+
+    if s.endswith("=X"):
+        return dict(type="FOREX",    tz="UTC",
+                    hours=None,              doji=0.15, strike=1,  label="Forex")
 
     if s.endswith(".MCX"):
         return dict(type="MCX",      tz="Asia/Kolkata",
-                    hours=("09:00","23:30"),   doji=0.20, strike=1)
+                    hours=("09:00","23:30"), doji=0.20, strike=1,  label="MCX")
 
-    if any(s.startswith(x) for x in ["^NSE","^BSE"]) or s.endswith((".NS",".BO")):
+    if (any(s.startswith(x) for x in ["^NSE","^BSE","^CNX"])
+            or s.endswith((".NS",".BO"))):
         return dict(type="INDIA",    tz="Asia/Kolkata",
-                    hours=("09:15","15:30"),   doji=0.20, strike=50)
+                    hours=("09:15","15:30"), doji=0.20, strike=50, label="India")
 
     if s in ["^GSPC","^DJI","^IXIC","SPY","QQQ","IWM"]:
         return dict(type="US_INDEX", tz="America/New_York",
-                    hours=("09:30","16:00"),   doji=0.20, strike=5)
+                    hours=("09:30","16:00"), doji=0.20, strike=5,  label="US Idx")
 
     return         dict(type="STOCK",    tz="America/New_York",
-                    hours=("09:30","16:00"),   doji=0.20, strike=1)
+                    hours=("09:30","16:00"), doji=0.20, strike=1,  label="Stock")
 
-
-def _quick_price(symbol: str):
-    try:
-        df = yf.download(symbol, period="1d", interval="1m",
-                         auto_adjust=False, progress=False)
-        if not df.empty:
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = [c[0] for c in df.columns]
-            return float(df["Close"].iloc[-1])
-    except Exception:
-        pass
-    return None
-
-
-# ────────────────────────────────────────────────────────────────────
-# MARKET HOURS CHECK
-# ────────────────────────────────────────────────────────────────────
 
 def is_market_open(profile: dict) -> bool:
-    if profile["hours"] is None:
-        return True
     tz     = ZoneInfo(profile["tz"])
     now_tz = datetime.now(tz)
-    if now_tz.weekday() >= 5:
-        return False                            # Sat=5, Sun=6
+    if profile["type"] not in ("CRYPTO", "FOREX") and now_tz.weekday() >= 5:
+        return False                          # weekend — closed for non-crypto/forex
+    if profile["hours"] is None:
+        return True                           # 24×7 asset
+    if profile["type"] == "FUTURES":
+        return True                           # futures trade ~24h on weekdays
     curr = now_tz.strftime("%H:%M")
     return profile["hours"][0] <= curr <= profile["hours"][1]
 
@@ -175,219 +195,266 @@ def send_alert(msg: str):
 
 
 # ────────────────────────────────────────────────────────────────────
-# DATA FETCH  (3 retries with back-off)
+# DATA FETCH  (called in parallel threads)
+#
+# Returns: (symbol, DataFrame or None)
+# The tuple return lets us match results back to symbols after
+# parallel execution completes.
+#
+# Rate limit protection:
+#   • MAX_WORKERS=5 caps simultaneous requests
+#   • 429 detected → sleep 60s in that thread only, others continue
+#   • 3 retries with exponential back-off per symbol
 # ────────────────────────────────────────────────────────────────────
 
-def fetch_data(symbol: str, interval: str, retries: int = 3):
+def fetch_one(symbol: str, interval: str, retries: int = 3):
+    """Fetch data for a single symbol. Returns (symbol, df or None)."""
     for attempt in range(1, retries + 1):
         try:
-            df = yf.download(symbol, period="2d", interval=interval,
-                             auto_adjust=False, progress=False)
+            df = yf.download(
+                symbol,
+                period      = "1d",
+                interval    = interval,
+                auto_adjust = False,
+                progress    = False,
+                threads     = False,    # thread-safe: one HTTP call per thread
+            )
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = [c[0] for c in df.columns]
-            if not df.empty:
-                return df
+
+            if df.empty:
+                raise ValueError("Empty")
+
+            keep = [c for c in ["Open","High","Low","Close","Volume"] if c in df.columns]
+            df   = df[keep].copy()
+
+            for col in ["Open","High","Low","Close"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").astype("float32")
+            if "Volume" in df.columns:
+                df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").astype("float32")
+
+            df.dropna(subset=["Open","High","Low","Close"], inplace=True)
+
+            if len(df) < 10:
+                raise ValueError(f"Only {len(df)} rows")
+
+            return symbol, df
+
         except Exception as e:
-            print(f"⚠️  [{symbol}] Fetch attempt {attempt} failed: {e}")
-        time.sleep(3 * attempt)
-    return None
+            err = str(e)
+            if "429" in err or "Too Many Requests" in err:
+                print(f"⚠️  [{symbol}] Rate limited — sleeping 60s")
+                time.sleep(60)
+            else:
+                wait = 3 * (2 ** (attempt - 1))
+                if attempt < retries:
+                    time.sleep(wait)
+
+    return symbol, None
+
+
+def fetch_all_parallel(symbols: list, interval: str) -> dict:
+    """
+    Fetch all symbols in parallel batches of MAX_WORKERS.
+    Returns dict: {symbol: DataFrame or None}
+
+    Why batched and not all at once?
+    Sending 14 requests simultaneously could trigger Yahoo's rate limit.
+    Batching in groups of 5 keeps us safe while still being fast.
+
+    Time comparison:
+      Sequential (old): ~3s × 14 = 42s
+      Parallel batch 5: ~3s × 3 batches = ~9s
+    """
+    results = {}
+    batch_size = MAX_WORKERS
+
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i : i + batch_size]
+
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
+            futures = {
+                executor.submit(fetch_one, sym, interval): sym
+                for sym in batch
+            }
+            for future in as_completed(futures):
+                try:
+                    sym, df = future.result(timeout=30)
+                    results[sym] = df
+                except Exception as e:
+                    sym = futures[future]
+                    print(f"⚠️  [{sym}] Thread error: {e}")
+                    results[sym] = None
+
+        # Small pause between batches — not within batches
+        # This gives Yahoo a brief rest between bursts, not between symbols
+        if i + batch_size < len(symbols):
+            time.sleep(1.5)
+
+    return results
 
 
 # ────────────────────────────────────────────────────────────────────
 # HEIKIN ASHI
-# Smoothed candles. Each candle averages itself with the previous one.
-# Makes trends cleaner and reduces false signals vs regular candles.
 # ────────────────────────────────────────────────────────────────────
 
 def heikin_ashi(df: pd.DataFrame):
-    ohlc = df[["Open","High","Low","Close"]].apply(
-        pd.to_numeric, errors="coerce").dropna()
-    if len(ohlc) < 10:
-        return None
-
-    o = ohlc["Open"].values.astype(float)
-    h = ohlc["High"].values.astype(float)
-    l = ohlc["Low"].values.astype(float)
-    c = ohlc["Close"].values.astype(float)
+    o = df["Open"].values.astype("float32")
+    h = df["High"].values.astype("float32")
+    l = df["Low"].values.astype("float32")
+    c = df["Close"].values.astype("float32")
 
     ha_c    = (o + h + l + c) / 4
-    ha_o    = np.zeros_like(o)
+    ha_o    = np.empty_like(o)
     ha_o[0] = (o[0] + c[0]) / 2
     for i in range(1, len(o)):
         ha_o[i] = (ha_o[i-1] + ha_c[i-1]) / 2
 
-    return pd.DataFrame({
+    ha = pd.DataFrame({
         "open":  ha_o,
         "close": ha_c,
         "high":  np.maximum.reduce([ha_o, ha_c, h]),
         "low":   np.minimum.reduce([ha_o, ha_c, l]),
-    })
+    }, dtype="float32")
+
+    del o, h, l, c, ha_c, ha_o
+    return ha
 
 
 # ────────────────────────────────────────────────────────────────────
 # INDICATORS
-# RSI  = is market overbought or oversold?
-# ATR  = how volatile is the market right now? (sets SL size)
-# EMA  = what is the overall trend direction?
-# Vol  = is this move backed by real volume?
 # ────────────────────────────────────────────────────────────────────
 
 def compute_indicators(df: pd.DataFrame) -> dict:
-    close = pd.to_numeric(df["Close"], errors="coerce")
-    high  = pd.to_numeric(df["High"],  errors="coerce")
-    low   = pd.to_numeric(df["Low"],   errors="coerce")
+    close = df["Close"].astype("float32")
+    high  = df["High"].astype("float32")
+    low   = df["Low"].astype("float32")
 
     # RSI 14
     delta   = close.diff()
     gain    = delta.clip(lower=0).rolling(14).mean()
     loss    = (-delta.clip(upper=0)).rolling(14).mean()
-    rsi_raw = 100 - 100 / (1 + gain / loss)
-    rsi     = float(rsi_raw.iloc[-2]) if not np.isnan(rsi_raw.iloc[-2]) else 50.0
+    rs      = gain / loss.replace(0, np.nan)
+    rsi_s   = 100 - 100 / (1 + rs)
+    rsi     = float(rsi_s.iloc[-2]) if pd.notna(rsi_s.iloc[-2]) else 50.0
 
     # ATR 14
-    tr = pd.concat([
-        (high - low),
-        (high - close.shift(1)).abs(),
-        (low  - close.shift(1)).abs()
-    ], axis=1).max(axis=1)
-    atr_raw = tr.rolling(14).mean()
-    atr     = float(atr_raw.iloc[-2]) if not np.isnan(atr_raw.iloc[-2]) else float(tr.mean())
+    pc    = close.shift(1)
+    tr    = pd.concat([(high-low),(high-pc).abs(),(low-pc).abs()], axis=1).max(axis=1)
+    atr_s = tr.rolling(14).mean()
+    atr   = float(atr_s.iloc[-2]) if pd.notna(atr_s.iloc[-2]) else float(tr.mean())
 
     # EMA 20
-    ema_raw = close.ewm(span=20, adjust=False).mean()
-    ema     = float(ema_raw.iloc[-2]) if not np.isnan(ema_raw.iloc[-2]) else float(close.iloc[-2])
+    ema_s = close.ewm(span=20, adjust=False).mean()
+    ema   = float(ema_s.iloc[-2]) if pd.notna(ema_s.iloc[-2]) else float(close.iloc[-2])
 
     # Volume ratio
     vol_ratio = 1.0
     if "Volume" in df.columns:
-        vol = pd.to_numeric(df["Volume"], errors="coerce")
+        vol = df["Volume"].astype("float32")
         avg = vol.rolling(20).mean().iloc[-2]
-        if avg and avg > 0:
+        if pd.notna(avg) and avg > 0:
             vol_ratio = float(vol.iloc[-2] / avg)
 
+    del delta, gain, loss, rs, rsi_s, pc, tr, atr_s, ema_s
     return {"rsi": rsi, "atr": atr, "ema": ema, "vol_ratio": vol_ratio}
 
 
 # ────────────────────────────────────────────────────────────────────
-# PROBABILITY SCORING  (0 – 100)
-#
-#  Factor             Max   What it checks
-#  ─────────────────────────────────────────────────────
-#  Candle body size    25   Is signal candle strong or weak?
-#  RSI zone            25   Right momentum zone for direction?
-#  Volume surge        20   Is big money behind this move?
-#  Prior trend         20   Clean trend before the reversal?
-#  Price vs EMA20      10   Does overall market agree?
-#  ─────────────────────────────────────────────────────
-#  TOTAL              100
-#
-#  Trade entered only if score >= MIN_PROBABILITY
-# ────────────────────────────────────────────────────────────────────
-
-def compute_probability(ha: pd.DataFrame, ind: dict, direction: str) -> tuple:
-    score     = 0
-    breakdown = {}
-    curr      = ha.iloc[-2]    # last confirmed closed candle
-
-    # 1. Candle body strength (0-25)
-    rng      = curr["high"] - curr["low"]
-    body     = abs(curr["close"] - curr["open"])
-    strength = (body / rng) if rng > 0 else 0
-    pts      = min(round(strength * 25), 25)
-    score   += pts
-    breakdown["Body Strength"] = f"{pts}/25  (body={round(strength*100)}% of range)"
-
-    # 2. RSI zone (0-25)
-    rsi = ind["rsi"]
-    if direction == "CALL":
-        if   rsi < 30:  rsi_pts = 20   # oversold → likely to bounce
-        elif rsi <= 60: rsi_pts = 25   # ideal range
-        elif rsi <= 70: rsi_pts = 10   # a bit stretched
-        else:           rsi_pts = 0    # overbought → risky for CALL
-    else:
-        if   rsi > 70:  rsi_pts = 20
-        elif rsi >= 40: rsi_pts = 25
-        elif rsi >= 30: rsi_pts = 10
-        else:           rsi_pts = 0    # oversold → risky for PUT
-    score += rsi_pts
-    breakdown["RSI Zone"] = f"{rsi_pts}/25  (RSI={round(rsi,1)})"
-
-    # 3. Volume surge (0-20)
-    vr      = ind["vol_ratio"]
-    vol_pts = 20 if vr >= 2.0 else (15 if vr >= 1.5 else (8 if vr >= 1.0 else 0))
-    score  += vol_pts
-    breakdown["Volume"] = f"{vol_pts}/20  ({round(vr,2)}× avg)"
-
-    # 4. Prior HA trend — last 5 candles before flip (0-20)
-    prior = ha.iloc[-7:-2]
-    if direction == "CALL":
-        agree = int((prior["close"] < prior["open"]).sum())   # prior bearish candles
-    else:
-        agree = int((prior["close"] > prior["open"]).sum())   # prior bullish candles
-    trend_pts = round((agree / 5) * 20)
-    score    += trend_pts
-    breakdown["Prior Trend"] = f"{trend_pts}/20  ({agree}/5 candles)"
-
-    # 5. Price vs EMA20 (0-10)
-    price   = float(curr["close"])
-    ema_pts = 10 if (direction == "CALL" and price > ind["ema"]) or \
-                    (direction == "PUT"  and price < ind["ema"]) else 0
-    score  += ema_pts
-    breakdown["EMA20"] = f"{ema_pts}/10  (price={round(price,2)}, EMA={round(ind['ema'],2)})"
-
-    return score, breakdown
-
-
-# ────────────────────────────────────────────────────────────────────
-# SIGNAL DETECTION
-#
-# Heikin Ashi colour flip:
-#   Red candle → Green candle = CALL  (downtrend reversing up)
-#   Green candle → Red candle = PUT   (uptrend reversing down)
-#
-# Uses iloc[-3] (prev) and iloc[-2] (curr) — both confirmed closed.
-# iloc[-1] = still-forming live candle — intentionally IGNORED.
+# SIGNAL
+# iloc[-3] = prev confirmed candle
+# iloc[-2] = last confirmed candle
+# iloc[-1] = live forming candle — NEVER used
 # ────────────────────────────────────────────────────────────────────
 
 def not_doji(row, thresh: float) -> bool:
-    rng = row["high"] - row["low"]
-    return rng > 0 and abs(row["close"] - row["open"]) > thresh * rng
+    rng = float(row["high"]) - float(row["low"])
+    return rng > 0 and abs(float(row["close"]) - float(row["open"])) > thresh * rng
 
 
 def check_signal(ha: pd.DataFrame, doji_thresh: float):
+    if len(ha) < 4:
+        return None
     prev = ha.iloc[-3]
     curr = ha.iloc[-2]
 
-    if (prev["close"] < prev["open"] and
-        curr["close"] > curr["open"] and
-        not_doji(prev, doji_thresh) and
-        not_doji(curr, doji_thresh)):
+    if (prev["close"] < prev["open"] and curr["close"] > curr["open"]
+            and not_doji(prev, doji_thresh) and not_doji(curr, doji_thresh)):
         return "CALL"
 
-    if (prev["close"] > prev["open"] and
-        curr["close"] < curr["open"] and
-        not_doji(prev, doji_thresh) and
-        not_doji(curr, doji_thresh)):
+    if (prev["close"] > prev["open"] and curr["close"] < curr["open"]
+            and not_doji(prev, doji_thresh) and not_doji(curr, doji_thresh)):
         return "PUT"
 
     return None
 
 
 # ────────────────────────────────────────────────────────────────────
-# STOP LOSS  (ATR-based)
-# Volatile day = wider SL = fewer false hits
-# Calm day     = tighter SL = better risk management
+# PROBABILITY SCORING  (0 – 100)
+# ────────────────────────────────────────────────────────────────────
+
+def compute_probability(ha: pd.DataFrame, ind: dict, direction: str) -> tuple:
+    score = 0
+    breakdown = {}
+    curr  = ha.iloc[-2]
+
+    # 1. Candle body strength (0-25)
+    rng      = float(curr["high"]) - float(curr["low"])
+    body     = abs(float(curr["close"]) - float(curr["open"]))
+    strength = (body / rng) if rng > 0 else 0
+    pts      = min(round(strength * 25), 25)
+    score   += pts
+    breakdown["Body Strength"] = f"{pts}/25  ({round(strength*100)}% of range)"
+
+    # 2. RSI zone (0-25)
+    rsi = ind["rsi"]
+    if direction == "CALL":
+        rsi_pts = 25 if 30<=rsi<=60 else (20 if rsi<30 else (10 if rsi<=70 else 0))
+    else:
+        rsi_pts = 25 if 40<=rsi<=70 else (20 if rsi>70 else (10 if rsi>=30 else 0))
+    score += rsi_pts
+    breakdown["RSI Zone"] = f"{rsi_pts}/25  (RSI={round(rsi,1)})"
+
+    # 3. Volume surge (0-20)
+    vr      = ind["vol_ratio"]
+    vol_pts = 20 if vr>=2.0 else (15 if vr>=1.5 else (8 if vr>=1.0 else 0))
+    score  += vol_pts
+    breakdown["Volume"] = f"{vol_pts}/20  ({round(vr,2)}× avg)"
+
+    # 4. Prior HA trend (0-20)
+    if len(ha) >= 7:
+        prior     = ha.iloc[-7:-2]
+        agree     = int((prior["close"] < prior["open"]).sum()) if direction=="CALL" \
+               else int((prior["close"] > prior["open"]).sum())
+        trend_pts = round((agree / 5) * 20)
+    else:
+        agree, trend_pts = 0, 0
+    score += trend_pts
+    breakdown["Prior Trend"] = f"{trend_pts}/20  ({agree}/5 candles)"
+
+    # 5. Price vs EMA20 (0-10)
+    price   = float(curr["close"])
+    ema_pts = 10 if (direction=="CALL" and price>ind["ema"]) or \
+                    (direction=="PUT"  and price<ind["ema"]) else 0
+    score  += ema_pts
+    breakdown["EMA20"] = f"{ema_pts}/10  (price={round(price,4)}, EMA={round(ind['ema'],4)})"
+
+    return score, breakdown
+
+
+# ────────────────────────────────────────────────────────────────────
+# STOP LOSS
 # ────────────────────────────────────────────────────────────────────
 
 def calc_sl(price: float, atr: float, direction: str) -> float:
-    return price - (atr * ATR_SL_MULTIPLIER) if direction == "CALL" \
-      else price + (atr * ATR_SL_MULTIPLIER)
+    return price-(atr*ATR_SL_MULTIPLIER) if direction=="CALL" \
+      else price+(atr*ATR_SL_MULTIPLIER)
 
 
 def trail_sl(current_sl: float, price: float, atr: float, direction: str) -> float:
     new_sl = calc_sl(price, atr, direction)
-    return max(current_sl, new_sl) if direction == "CALL" \
-      else min(current_sl, new_sl)
+    return max(current_sl, new_sl) if direction=="CALL" else min(current_sl, new_sl)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -402,71 +469,178 @@ def seconds_until_next_5min() -> float:
 
 
 # ────────────────────────────────────────────────────────────────────
-# LIVE DASHBOARD
+# PROCESS ONE SYMBOL (signal check + entry/exit)
+# Called after all fetches complete — pure logic, no I/O delay
 # ────────────────────────────────────────────────────────────────────
 
-def print_dashboard(states: dict, sleep_secs: float):
+def process_symbol(sym: str, df: pd.DataFrame, st: dict) -> None:
+    """All signal/entry/exit logic for one symbol. Modifies st in place."""
+
+    # Skip if same candle already processed
+    candle_time = df.index[-1]
+    if candle_time == st["last_time"]:
+        return
+    st["last_time"] = candle_time
+
+    ha = heikin_ashi(df)
+    if ha is None:
+        return
+
+    try:
+        ind = compute_indicators(df)
+    except Exception as e:
+        print(f"⚠️  [{sym}] Indicator error: {e}")
+        del ha
+        return
+
+    # Confirmed last closed candle price
+    price = float(df["Close"].iloc[-2])
+    st["latest_price"] = price
+
+    # ── EXIT ──────────────────────────────────────────────────────
+    if st["position"]:
+        entry = st["entry_price"]
+        pos   = st["position"]
+
+        st["trailing_sl"] = trail_sl(st["trailing_sl"], price, ind["atr"], pos)
+
+        p_pct = (price-entry)/entry if pos=="CALL" else (entry-price)/entry
+
+        exit_reason = None
+        if   p_pct >= TP_THRESHOLD:                      exit_reason = "✅ TAKE PROFIT HIT"
+        elif pos=="CALL" and price < st["trailing_sl"]:  exit_reason = "❌ STOP LOSS HIT"
+        elif pos=="PUT"  and price > st["trailing_sl"]:  exit_reason = "❌ STOP LOSS HIT"
+
+        if exit_reason:
+            pnl        = (price-entry) if pos=="CALL" else (entry-price)
+            st["pnl"] += pnl
+
+            if pnl > 0:
+                st["wins"] += 1
+            else:
+                st["losses"]       += 1
+                st["daily_losses"] += 1
+
+            st["best"]  = max(st["best"],  pnl)
+            st["worst"] = min(st["worst"], pnl)
+
+            send_alert(
+                f"{exit_reason}\n"
+                f"{'─'*28}\n"
+                f"Symbol    : {sym}\n"
+                f"Direction : {pos}\n"
+                f"Entry     : {round(entry,4)}\n"
+                f"Exit      : {round(price,4)}\n"
+                f"P&L       : {round(pnl,4)}\n"
+                f"Total P&L : {round(st['pnl'],4)}\n"
+                f"Time(IST) : {ist_now()}"
+            )
+            st["position"] = st["entry_price"] = st["trailing_sl"] = None
+
+    # ── ENTRY ─────────────────────────────────────────────────────
+    elif st["position"] is None:
+        signal = check_signal(ha, st["profile"]["doji"])
+
+        if signal:
+            score, breakdown = compute_probability(ha, ind, signal)
+            st["last_prob"]   = f"{score}%"
+
+            if score >= MIN_PROBABILITY:
+                st["position"]    = signal
+                st["entry_price"] = price
+                st["trailing_sl"] = calc_sl(price, ind["atr"], signal)
+                strike = st["profile"]["strike"]
+                atm    = round(price/strike)*strike if strike > 0 else price
+
+                send_alert(
+                    f"📊 {signal} ENTRY\n"
+                    f"{'─'*28}\n"
+                    f"Symbol     : {sym}\n"
+                    f"Type       : {st['profile']['label']}\n"
+                    f"Probability: {score}%\n"
+                    f"Price      : {round(price,4)}\n"
+                    f"ATM Strike : {atm}\n"
+                    f"Stop Loss  : {round(st['trailing_sl'],4)}\n"
+                    f"ATR        : {round(ind['atr'],4)}\n"
+                    f"RSI        : {round(ind['rsi'],1)}\n"
+                    f"Time(IST)  : {ist_now()}\n"
+                    f"{'─'*28}\n"
+                    + "\n".join(f"  {k}: {v}" for k,v in breakdown.items())
+                )
+            else:
+                st["last_prob"] = f"{score}%⚠️"
+                print(f"  [{sym}] {signal} skipped — score {score}% < {MIN_PROBABILITY}%")
+
+    del ha, ind
+    gc.collect()
+
+
+# ────────────────────────────────────────────────────────────────────
+# DASHBOARD
+# ────────────────────────────────────────────────────────────────────
+
+def print_dashboard(states: dict, fetch_ms: int, sleep_secs: float):
     clear_output(wait=True)
     now = datetime.now(IST).strftime("%d-%b-%Y  %I:%M:%S %p  IST")
 
-    print(f"\n  ╔{'═'*72}╗")
-    print(f"  ║  🤖  TRADING BOT  ·  {now:<49}║")
-    print(f"  ╚{'═'*72}╝")
-    print(f"\n  Settings → MinProb:{MIN_PROBABILITY}%  "
-          f"ATR×{ATR_SL_MULTIPLIER}  TP:{int(TP_THRESHOLD*100)}%  "
-          f"MaxLoss/day:{MAX_DAILY_LOSS}")
+    print(f"\n  ╔{'═'*76}╗")
+    print(f"  ║  🤖  TRADING BOT  ·  {now:<53}║")
+    print(f"  ╚{'═'*76}╝")
+    print(f"  MinProb:{MIN_PROBABILITY}%  ATR×{ATR_SL_MULTIPLIER}  "
+          f"TP:{int(TP_THRESHOLD*100)}%  MaxLoss:{MAX_DAILY_LOSS}  "
+          f"Workers:{MAX_WORKERS}  FetchTime:{fetch_ms}ms\n")
 
-    print(f"\n  {'SYMBOL':<14} {'MKT':<7} {'POS':<5} {'ENTRY':>10} "
-          f"{'PRICE':>10} {'UNREAL':>10} {'PROB':>6} "
-          f"{'T':>4} {'W':>4} {'L':>4} {'WIN%':>6} "
-          f"{'P&L':>9} {'BEST':>9} {'WORST':>9}")
-    print("  " + "─" * 122)
+    hdr = (f"  {'SYMBOL':<14} {'TYPE':<8} {'MKT':<7} {'POS':<5} "
+           f"{'ENTRY':>10} {'PRICE':>10} {'UNREAL':>9} {'PROB':>6} "
+           f"{'T':>3} {'W':>3} {'L':>3} {'WIN%':>5} "
+           f"{'P&L':>9} {'BEST':>8} {'WORST':>8}")
+    sep = "  " + "─" * (len(hdr) - 2)
+    print(hdr)
+    print(sep)
 
     g = dict(w=0, l=0, pnl=0.0, best=float("-inf"), worst=float("inf"))
 
     for sym, st in states.items():
-        mkt   = "OPEN" if is_market_open(st["profile"]) else "CLOSED"
-        pos   = st["position"] or "—"
-        entry = st["entry_price"]
-        price = st["latest_price"]
-        prob  = str(st.get("last_prob", "—"))
+        mkt    = "OPEN" if is_market_open(st["profile"]) else "CLOSED"
+        typ    = st["profile"]["label"]
+        pos    = st["position"] or "—"
+        entry  = st["entry_price"]
+        price  = st["latest_price"]
+        prob   = str(st.get("last_prob","—"))
         entry_d = f"{round(entry,2)}" if entry else "—"
 
         unreal = 0.0
-        if st["position"] == "CALL" and entry: unreal = price - entry
-        elif st["position"] == "PUT" and entry: unreal = entry - price
-        u_str = f"{'▲' if unreal >= 0 else '▼'}{abs(round(unreal,2))}"
+        if pos=="CALL" and entry: unreal = price - entry
+        elif pos=="PUT" and entry: unreal = entry - price
+        u_str = f"{'▲' if unreal>=0 else '▼'}{abs(round(unreal,4))}"
 
-        w   = st["wins"]
-        l   = st["losses"]
-        tot = w + l
-        wr  = f"{round(w/tot*100,1)}%" if tot > 0 else "—"
-
+        w, l  = st["wins"], st["losses"]
+        tot   = w + l
+        wr    = f"{round(w/tot*100)}%" if tot>0 else "—"
         pnl   = st["pnl"]
-        best  = round(st["best"],  2) if st["best"]  != float("-inf") else "—"
-        worst = round(st["worst"], 2) if st["worst"] != float("inf")  else "—"
+        best  = round(st["best"],  4) if st["best"]  != float("-inf") else "—"
+        worst = round(st["worst"], 4) if st["worst"] != float("inf")  else "—"
+        pause = " ⏸" if st["daily_losses"] >= MAX_DAILY_LOSS else ""
 
-        print(f"  {sym:<14} {mkt:<7} {pos:<5} {entry_d:>10} "
-              f"{round(price,2):>10} {u_str:>10} {prob:>6} "
-              f"{tot:>4} {w:>4} {l:>4} {wr:>6} "
-              f"{round(pnl,2):>9} {str(best):>9} {str(worst):>9}")
+        print(f"  {sym:<14} {typ:<8} {mkt:<7} {pos:<5} "
+              f"{entry_d:>10} {round(price,4):>10} {u_str:>9} {prob:>6} "
+              f"{tot:>3} {w:>3} {l:>3} {wr:>5} "
+              f"{round(pnl,4):>9} {str(best):>8} {str(worst):>8}{pause}")
 
-        g["w"]   += w
-        g["l"]   += l
-        g["pnl"] += pnl
+        g["w"]   += w;  g["l"]   += l;  g["pnl"] += pnl
         if st["best"]  != float("-inf"): g["best"]  = max(g["best"],  st["best"])
         if st["worst"] != float("inf"):  g["worst"] = min(g["worst"], st["worst"])
 
-    print("  " + "─" * 122)
+    print(sep)
     gt  = g["w"] + g["l"]
-    gwr = f"{round(g['w']/gt*100,1)}%" if gt > 0 else "—"
-    gb  = round(g["best"],  2) if g["best"]  != float("-inf") else "—"
-    gwo = round(g["worst"], 2) if g["worst"] != float("inf")  else "—"
+    gwr = f"{round(g['w']/gt*100)}%" if gt>0 else "—"
+    gb  = round(g["best"],  4) if g["best"]  != float("-inf") else "—"
+    gwo = round(g["worst"], 4) if g["worst"] != float("inf")  else "—"
     icon = "📈" if g["pnl"] >= 0 else "📉"
-    print(f"\n  TOTAL → Trades:{gt}  Wins:{g['w']}  Losses:{g['l']}  "
-          f"WinRate:{gwr}  {icon} P&L:{round(g['pnl'],2)}  "
-          f"Best:{gb}  Worst:{gwo}")
-    print(f"\n  ⏳ Next candle in {round(sleep_secs)}s  ·  Ctrl+C to stop\n")
+    print(f"\n  TOTAL  T:{gt}  W:{g['w']}  L:{g['l']}  WR:{gwr}  "
+          f"{icon} P&L:{round(g['pnl'],4)}  Best:{gb}  Worst:{gwo}")
+    print(f"\n  ⏳ Next candle in {round(sleep_secs)}s  "
+          f"·  Last fetch took {fetch_ms}ms  ·  Ctrl+C to stop\n")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -474,29 +648,26 @@ def print_dashboard(states: dict, sleep_secs: float):
 # ════════════════════════════════════════════════════════════════════
 
 def start_bot():
-    print(f"\n🚀 Starting bot...")
-    print(f"   Symbols   : {SYMBOLS}")
-    print(f"   Min Prob  : {MIN_PROBABILITY}%")
-    print(f"   ATR SL    : {ATR_SL_MULTIPLIER}×")
-    print(f"   TP        : {int(TP_THRESHOLD*100)}%")
-    print(f"   Platform  : {'Google Colab' if IN_COLAB else 'GitHub Actions / Terminal'}")
-    print(f"   Time(IST) : {ist_now()}\n")
+    print(f"\n🚀 Bot starting  ·  {ist_now()}")
+    print(f"   {len(SYMBOLS)} symbols  ·  {MAX_WORKERS} parallel workers")
+    print(f"   MinProb:{MIN_PROBABILITY}%  ATR×{ATR_SL_MULTIPLIER}  "
+          f"TP:{int(TP_THRESHOLD*100)}%  MaxLoss:{MAX_DAILY_LOSS}\n")
 
     send_alert(
-        f"🤖 Bot Started\n"
-        f"{'─'*28}\n"
+        f"🤖 Bot Started\n{'─'*28}\n"
         f"Symbols    : {', '.join(SYMBOLS)}\n"
         f"Interval   : {INTERVAL}\n"
+        f"Workers    : {MAX_WORKERS} parallel\n"
         f"Min Prob   : {MIN_PROBABILITY}%\n"
         f"ATR SL     : {ATR_SL_MULTIPLIER}×\n"
         f"Take Profit: {int(TP_THRESHOLD*100)}%\n"
         f"Time (IST) : {ist_now()}"
     )
 
-    # Initialise per-symbol state
-    states = {}
-    for sym in SYMBOLS:
-        states[sym] = dict(
+    # Initialise state — deduplicate symbols preserving order
+    unique_symbols = list(dict.fromkeys(SYMBOLS))
+    states = {
+        sym: dict(
             position     = None,
             entry_price  = None,
             trailing_sl  = None,
@@ -512,137 +683,63 @@ def start_bot():
             daily_losses = 0,
             last_day     = datetime.now().date(),
         )
+        for sym in unique_symbols
+    }
+
+    fetch_ms = 0   # track last fetch duration for display
 
     while True:
+        cycle_start = time.time()
 
-        for sym in SYMBOLS:
-            st = states[sym]
-
-            # Reset daily loss counter at midnight
-            today = datetime.now().date()
+        # Reset daily counters at midnight
+        today = datetime.now().date()
+        for st in states.values():
             if today != st["last_day"]:
                 st["daily_losses"] = 0
                 st["last_day"]     = today
 
-            # Pause symbol if daily loss limit reached
-            if st["daily_losses"] >= MAX_DAILY_LOSS:
-                continue
+        # Only fetch symbols whose market is open and not paused
+        active = [
+            sym for sym, st in states.items()
+            if is_market_open(st["profile"])
+            and st["daily_losses"] < MAX_DAILY_LOSS
+        ]
 
-            # Skip if market closed for this symbol
-            if not is_market_open(st["profile"]):
-                continue
+        if active:
+            # ── STEP 1: Fetch ALL active symbols in parallel ─────────
+            # This is the slow I/O step — done once, as fast as possible
+            t0       = time.time()
+            data_map = fetch_all_parallel(active, INTERVAL)
+            fetch_ms = int((time.time() - t0) * 1000)
 
-            # Download candles
-            df = fetch_data(sym, INTERVAL)
-            if df is None:
-                continue
+            # ── STEP 2: Process signals — pure logic, instant ─────────
+            # No network calls here. All symbols processed immediately
+            # after fetch completes. Zero sequential delay.
+            for sym in active:
+                df = data_map.get(sym)
+                if df is None:
+                    continue
+                try:
+                    process_symbol(sym, df, states[sym])
+                except Exception as e:
+                    print(f"⚠️  [{sym}] Process error: {e}")
+                finally:
+                    del df
+                    data_map[sym] = None   # free immediately after use
 
-            # Skip duplicate candle
-            if df.index[-1] == st["last_time"]:
-                continue
-            st["last_time"] = df.index[-1]
+            del data_map
+            gc.collect()
+        else:
+            fetch_ms = 0
+            print(f"  All markets closed — {ist_now()}")
+            time.sleep(60)
+            continue
 
-            # Build HA candles
-            ha = heikin_ashi(df)
-            if ha is None:
-                continue
+        # ── Sleep until next 5-minute candle ─────────────────────────
+        elapsed    = time.time() - cycle_start
+        sleep_secs = max(5.0, seconds_until_next_5min() - elapsed)
 
-            # Compute indicators
-            try:
-                ind = compute_indicators(df)
-            except Exception as e:
-                print(f"⚠️  [{sym}] Indicator error: {e}")
-                continue
-
-            # Use iloc[-2] — last confirmed candle price (not live candle)
-            price = float(df["Close"].iloc[-2])
-            st["latest_price"] = price
-
-            # ── EXIT LOGIC ──────────────────────────────────────────
-            if st["position"]:
-                entry = st["entry_price"]
-                pos   = st["position"]
-
-                # Update trailing SL
-                st["trailing_sl"] = trail_sl(st["trailing_sl"], price, ind["atr"], pos)
-
-                # Calculate % profit/loss
-                p_pct = (price - entry) / entry if pos == "CALL" \
-                   else (entry - price) / entry
-
-                # Check TP first, then SL
-                exit_reason = None
-                if p_pct >= TP_THRESHOLD:
-                    exit_reason = "✅ TAKE PROFIT HIT"
-                elif pos == "CALL" and price < st["trailing_sl"]:
-                    exit_reason = "❌ STOP LOSS HIT"
-                elif pos == "PUT"  and price > st["trailing_sl"]:
-                    exit_reason = "❌ STOP LOSS HIT"
-
-                if exit_reason:
-                    pnl = (price - entry) if pos == "CALL" else (entry - price)
-                    st["pnl"] += pnl
-
-                    if pnl > 0:
-                        st["wins"] += 1
-                    else:
-                        st["losses"]       += 1
-                        st["daily_losses"] += 1
-
-                    st["best"]  = max(st["best"],  pnl)
-                    st["worst"] = min(st["worst"], pnl)
-
-                    send_alert(
-                        f"{exit_reason}\n"
-                        f"{'─'*28}\n"
-                        f"Symbol    : {sym}\n"
-                        f"Direction : {pos}\n"
-                        f"Entry     : {round(entry, 2)}\n"
-                        f"Exit      : {round(price, 2)}\n"
-                        f"P&L       : {round(pnl, 2)} pts\n"
-                        f"Total P&L : {round(st['pnl'], 2)} pts\n"
-                        f"Time(IST) : {ist_now()}"
-                    )
-                    st["position"]    = None
-                    st["entry_price"] = None
-                    st["trailing_sl"] = None
-
-            # ── ENTRY LOGIC ─────────────────────────────────────────
-            elif st["position"] is None:
-                signal = check_signal(ha, st["profile"]["doji"])
-
-                if signal:
-                    score, breakdown = compute_probability(ha, ind, signal)
-                    st["last_prob"]   = f"{score}%"
-
-                    if score >= MIN_PROBABILITY:
-                        st["position"]    = signal
-                        st["entry_price"] = price
-                        st["trailing_sl"] = calc_sl(price, ind["atr"], signal)
-                        atm = round(price / st["profile"]["strike"]) * st["profile"]["strike"]
-
-                        send_alert(
-                            f"📊 {signal} ENTRY\n"
-                            f"{'─'*28}\n"
-                            f"Symbol     : {sym}\n"
-                            f"Probability: {score}%\n"
-                            f"Price      : {round(price, 2)}\n"
-                            f"ATM Strike : {atm}\n"
-                            f"Stop Loss  : {round(st['trailing_sl'], 2)}\n"
-                            f"ATR        : {round(ind['atr'], 2)}\n"
-                            f"RSI        : {round(ind['rsi'], 1)}\n"
-                            f"Time(IST)  : {ist_now()}\n"
-                            f"{'─'*28}\n"
-                            + "\n".join(f"  {k}: {v}" for k, v in breakdown.items())
-                        )
-                    else:
-                        st["last_prob"] = f"{score}%⚠️"
-                        print(f"  [{sym}] {signal} skipped — "
-                              f"score {score}% < threshold {MIN_PROBABILITY}%")
-
-        # Dashboard + sleep until next candle
-        sleep_secs = seconds_until_next_5min()
-        print_dashboard(states, sleep_secs)
+        print_dashboard(states, fetch_ms, sleep_secs)
         time.sleep(sleep_secs)
 
 
@@ -653,23 +750,20 @@ start_bot()
 
 
 # ════════════════════════════════════════════════════════════════════
-# GITHUB ACTIONS WORKFLOW
-# ────────────────────────────────────────────────────────────────────
-# Save this as:  .github/workflows/run_bot.yml
-# in your GitHub repo (create the folders if they don't exist)
+# .github/workflows/run_bot.yml — copy into that file in your repo
 # ════════════════════════════════════════════════════════════════════
 #
 # name: Trading Bot
 #
 # on:
 #   schedule:
-#     - cron: '30 3 * * 1-5'    # 9:00 AM IST = 3:30 AM UTC, Mon-Fri only
-#   workflow_dispatch:            # adds a manual Run button in GitHub UI
+#     - cron: '30 3 * * 1-5'    # 9:00 AM IST = 3:30 AM UTC, Mon-Fri
+#   workflow_dispatch:
 #
 # jobs:
 #   run-bot:
 #     runs-on: ubuntu-latest
-#     timeout-minutes: 370        # auto-kills after ~6hrs = around 3:10 PM IST
+#     timeout-minutes: 370
 #
 #     steps:
 #       - uses: actions/checkout@v4
