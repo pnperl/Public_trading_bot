@@ -1,0 +1,35 @@
+════════════════════════════════════════════════════════════════════
+# GITHUB ACTIONS WORKFLOW
+# ────────────────────────────────────────────────────────────────────
+# Save this as:  .github/workflows/run_bot.yml
+# in your GitHub repo (create the folders if they don't exist)
+# ════════════════════════════════════════════════════════════════════
+#
+name: Trading Bot
+
+on:
+	schedule:
+		- cron: '30 3 * * 1-5'    # 9:00 AM IST = 3:30 AM UTC, Mon-Fri only
+	workflow_dispatch:            # adds a manual Run button in GitHub UI
+
+jobs:
+	run-bot:
+		runs-on: ubuntu-latest
+		timeout-minutes: 370        # auto-kills after ~6hrs = around 3:10 PM IST
+
+	steps:
+		- uses: actions/checkout@v4
+
+		- name: Set up Python
+			uses: actions/setup-python@v5
+			with:
+				python-version: '3.11'
+
+		- name: Install dependencies
+			run: pip install yfinance pandas numpy requests python-dotenv -q
+
+		- name: Run bot
+			env:
+				TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+				CHAT_ID: ${{ secrets.CHAT_ID }}
+			run: python trading_bot_reviewed.py
