@@ -54,6 +54,7 @@ IST = ZoneInfo("Asia/Kolkata")
 SYMBOLS = [
     # ── Indian Indices ──────────────────────────────────────────
     "^NSEI",           # NIFTY 50
+    "^NSEBANK",        # Nifty Bank
     "^CNXCMDT",        # NIFTY Commodities Index
 
     # ── Indian Stocks ───────────────────────────────────────────
@@ -69,8 +70,8 @@ SYMBOLS = [
     "HG=F",            # Copper
 
     # ── Crypto ──────────────────────────────────────────────────
-    "BTC-USD",
-    "ETH-USD",
+    #"BTC-USD",
+    #"ETH-USD",
 
     # ── Forex ───────────────────────────────────────────────────
     "INR=X",           # USD/INR
@@ -83,9 +84,9 @@ SYMBOLS = [
 
 INTERVAL          = "5m"   # candle size — do not change
 MIN_PROBABILITY   = 55     # 0–100. Raise to reduce signals, lower to increase.
-ATR_SL_MULTIPLIER = 1.5    # SL width. Try 2.0 if SL hits too often.
-TP_THRESHOLD      = 0.03   # 3% take profit
-MAX_DAILY_LOSS    = 3      # pause symbol after N losses in one day
+ATR_SL_MULTIPLIER = 2    # SL width. Try 2.0 if SL hits too often.
+TP_THRESHOLD      = 0.02   # 2% take profit
+MAX_DAILY_LOSS    = 30      # pause symbol after N losses in one day
 
 # ── Parallel fetch settings ─────────────────────────────────────────
 # MAX_WORKERS: how many symbols fetch simultaneously
