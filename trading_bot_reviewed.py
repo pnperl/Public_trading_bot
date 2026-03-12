@@ -63,11 +63,11 @@ SYMBOLS = [
     "MCX.NS",          # Multi Commodity Exchange stock
 
     # ── Global Commodity Futures ────────────────────────────────
-    #"GC=F",            # Gold
-    #"SI=F",            # Silver
-    #"CL=F",            # WTI Crude Oil
-    #"NG=F",            # Natural Gas
-    #"HG=F",            # Copper
+    "GC=F",            # Gold
+    "SI=F",            # Silver
+    "CL=F",            # WTI Crude Oil
+    "NG=F",            # Natural Gas
+    "HG=F",            # Copper
 
     # ── Crypto ──────────────────────────────────────────────────
     #"BTC-USD",
