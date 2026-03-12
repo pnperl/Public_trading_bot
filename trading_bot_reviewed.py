@@ -83,7 +83,7 @@ SYMBOLS = [
 ]
 
 INTERVAL          = "5m"   # candle size — do not change
-MIN_PROBABILITY   = 55     # 0–100. Raise to reduce signals, lower to increase.
+MIN_PROBABILITY   = 35     # 0–100. Raise to reduce signals, lower to increase.
 ATR_SL_MULTIPLIER = 2      # SL width. Try 2.0 if SL hits too often.
 TP_THRESHOLD      = 0.02   # 2% take profit
 MAX_DAILY_LOSS    = 30     # pause symbol after N losses in one day
