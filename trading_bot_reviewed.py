@@ -54,7 +54,7 @@ IST = ZoneInfo("Asia/Kolkata")
 SYMBOLS = [
     # ── Indian Indices ──────────────────────────────────────────
     "^NSEI",           # NIFTY 50
-    "^NSEBANK",        # Nifty Bank
+    "^NSEBANK",        # NIFTY Bank
     "^CNXCMDT",        # NIFTY Commodities Index
 
     # ── Indian Stocks ───────────────────────────────────────────
@@ -70,8 +70,8 @@ SYMBOLS = [
     "HG=F",            # Copper
 
     # ── Crypto ──────────────────────────────────────────────────
-    #"BTC-USD",
-    #"ETH-USD",
+    "BTC-USD",
+    "ETH-USD",
 
     # ── Forex ───────────────────────────────────────────────────
     "INR=X",           # USD/INR
@@ -84,9 +84,9 @@ SYMBOLS = [
 
 INTERVAL          = "5m"   # candle size — do not change
 MIN_PROBABILITY   = 55     # 0–100. Raise to reduce signals, lower to increase.
-ATR_SL_MULTIPLIER = 2    # SL width. Try 2.0 if SL hits too often.
+ATR_SL_MULTIPLIER = 2      # SL width. Try 2.0 if SL hits too often.
 TP_THRESHOLD      = 0.02   # 2% take profit
-MAX_DAILY_LOSS    = 30      # pause symbol after N losses in one day
+MAX_DAILY_LOSS    = 30     # pause symbol after N losses in one day
 
 # ── Parallel fetch settings ─────────────────────────────────────────
 # MAX_WORKERS: how many symbols fetch simultaneously
@@ -525,6 +525,18 @@ def process_symbol(sym: str, df: pd.DataFrame, st: dict) -> None:
             st["best"]  = max(st["best"],  pnl)
             st["worst"] = min(st["worst"], pnl)
 
+            # Log completed trade to history
+            st["trade_log"].append({
+                "time"  : ist_now(),
+                "symbol": sym,
+                "dir"   : pos,
+                "entry" : round(entry, 4),
+                "exit"  : round(price, 4),
+                "pnl"   : round(pnl,   4),
+                "result": "WIN" if pnl > 0 else "LOSS",
+                "reason": "TP" if "PROFIT" in exit_reason else "SL",
+            })
+
             send_alert(
                 f"{exit_reason}\n"
                 f"{'─'*28}\n"
@@ -577,71 +589,260 @@ def process_symbol(sym: str, df: pd.DataFrame, st: dict) -> None:
 
 
 # ────────────────────────────────────────────────────────────────────
-# DASHBOARD
+# DASHBOARD  — 3 sections:
+#   1. Live positions table   (refreshes every 5 min)
+#   2. Symbol summary table   (stats per symbol)
+#   3. Trade performance log  (every completed trade, newest first)
 # ────────────────────────────────────────────────────────────────────
 
 def print_dashboard(states: dict, fetch_ms: int, sleep_secs: float):
     clear_output(wait=True)
     now = datetime.now(IST).strftime("%d-%b-%Y  %I:%M:%S %p  IST")
+    W   = 110    # total console width
 
-    print(f"\n  ╔{'═'*76}╗")
-    print(f"  ║  🤖  TRADING BOT  ·  {now:<53}║")
-    print(f"  ╚{'═'*76}╝")
+    # ── Header ────────────────────────────────────────────────────
+    print(f"\n  ╔{'═'*(W-4)}╗")
+    print(f"  ║  🤖  TRADING BOT  ·  {now:<{W-26}}║")
+    print(f"  ╚{'═'*(W-4)}╝")
     print(f"  MinProb:{MIN_PROBABILITY}%  ATR×{ATR_SL_MULTIPLIER}  "
           f"TP:{int(TP_THRESHOLD*100)}%  MaxLoss:{MAX_DAILY_LOSS}  "
           f"Workers:{MAX_WORKERS}  FetchTime:{fetch_ms}ms\n")
 
-    hdr = (f"  {'SYMBOL':<14} {'TYPE':<8} {'MKT':<7} {'POS':<5} "
-           f"{'ENTRY':>10} {'PRICE':>10} {'UNREAL':>9} {'PROB':>6} "
-           f"{'T':>3} {'W':>3} {'L':>3} {'WIN%':>5} "
-           f"{'P&L':>9} {'BEST':>8} {'WORST':>8}")
-    sep = "  " + "─" * (len(hdr) - 2)
-    print(hdr)
-    print(sep)
-
-    g = dict(w=0, l=0, pnl=0.0, best=float("-inf"), worst=float("inf"))
+    # ════════════════════════════════════════════════════════════════
+    # TABLE 1 — LIVE POSITIONS
+    # Shows every symbol: market status, current position, unrealized P&L
+    # ════════════════════════════════════════════════════════════════
+    print(f"  {'─'*3} LIVE POSITIONS {'─'*(W-21)}")
+    h1 = (f"  {'SYMBOL':<14} {'TYPE':<8} {'MKT':<7} {'POS':<5} "
+          f"{'ENTRY':>10} {'PRICE':>12} {'UNREAL':>10} {'PROB':>6} {'SL':>12}")
+    print(h1)
+    print("  " + "─" * (len(h1)-2))
 
     for sym, st in states.items():
-        mkt    = "OPEN" if is_market_open(st["profile"]) else "CLOSED"
-        typ    = st["profile"]["label"]
-        pos    = st["position"] or "—"
-        entry  = st["entry_price"]
-        price  = st["latest_price"]
-        prob   = str(st.get("last_prob","—"))
-        entry_d = f"{round(entry,2)}" if entry else "—"
+        mkt     = "OPEN"   if is_market_open(st["profile"]) else "CLOSED"
+        typ     = st["profile"]["label"]
+        pos     = st["position"] or "—"
+        entry   = st["entry_price"]
+        price   = st["latest_price"]
+        prob    = str(st.get("last_prob","—"))
+        sl      = st["trailing_sl"]
+        entry_d = f"{round(entry,4)}"  if entry else "—"
+        sl_d    = f"{round(sl,4)}"     if sl    else "—"
+        pause   = " ⏸" if st["daily_losses"] >= MAX_DAILY_LOSS else ""
 
         unreal = 0.0
         if pos=="CALL" and entry: unreal = price - entry
         elif pos=="PUT" and entry: unreal = entry - price
-        u_str = f"{'▲' if unreal>=0 else '▼'}{abs(round(unreal,4))}"
+        u_icon = "▲" if unreal >= 0 else "▼"
+        u_str  = f"{u_icon}{abs(round(unreal,4))}"
 
+        print(f"  {sym:<14} {typ:<8} {mkt:<7} {pos:<5} "
+              f"{entry_d:>10} {round(price,4):>12} {u_str:>10} {prob:>6} {sl_d:>12}{pause}")
+
+    # ════════════════════════════════════════════════════════════════
+    # TABLE 2 — SYMBOL PERFORMANCE SUMMARY
+    # Win rate, total P&L, best/worst trade per symbol
+    # ════════════════════════════════════════════════════════════════
+    print(f"\n  {'─'*3} SYMBOL PERFORMANCE {'─'*(W-25)}")
+    h2 = (f"  {'SYMBOL':<14} {'TYPE':<8} {'TRADES':>6} {'WINS':>5} {'LOSSES':>7} "
+          f"{'WIN%':>6} {'REALIZED P&L':>13} {'BEST':>10} {'WORST':>10} {'DAILY L':>8}")
+    print(h2)
+    print("  " + "─" * (len(h2)-2))
+
+    g = dict(w=0, l=0, pnl=0.0, best=float("-inf"), worst=float("inf"))
+
+    for sym, st in states.items():
+        typ   = st["profile"]["label"]
         w, l  = st["wins"], st["losses"]
         tot   = w + l
-        wr    = f"{round(w/tot*100)}%" if tot>0 else "—"
+        wr    = f"{round(w/tot*100,1)}%" if tot > 0 else "—"
         pnl   = st["pnl"]
         best  = round(st["best"],  4) if st["best"]  != float("-inf") else "—"
         worst = round(st["worst"], 4) if st["worst"] != float("inf")  else "—"
-        pause = " ⏸" if st["daily_losses"] >= MAX_DAILY_LOSS else ""
+        dl    = st["daily_losses"]
+        pnl_icon = "+" if pnl >= 0 else ""
 
-        print(f"  {sym:<14} {typ:<8} {mkt:<7} {pos:<5} "
-              f"{entry_d:>10} {round(price,4):>10} {u_str:>9} {prob:>6} "
-              f"{tot:>3} {w:>3} {l:>3} {wr:>5} "
-              f"{round(pnl,4):>9} {str(best):>8} {str(worst):>8}{pause}")
+        print(f"  {sym:<14} {typ:<8} {tot:>6} {w:>5} {l:>7} "
+              f"{wr:>6} {pnl_icon}{round(pnl,4):>12} {str(best):>10} {str(worst):>10} {dl:>8}")
 
-        g["w"]   += w;  g["l"]   += l;  g["pnl"] += pnl
+        g["w"]   += w;  g["l"] += l;  g["pnl"] += pnl
         if st["best"]  != float("-inf"): g["best"]  = max(g["best"],  st["best"])
         if st["worst"] != float("inf"):  g["worst"] = min(g["worst"], st["worst"])
 
-    print(sep)
-    gt  = g["w"] + g["l"]
-    gwr = f"{round(g['w']/gt*100)}%" if gt>0 else "—"
-    gb  = round(g["best"],  4) if g["best"]  != float("-inf") else "—"
-    gwo = round(g["worst"], 4) if g["worst"] != float("inf")  else "—"
+    # Summary row
+    print("  " + "═" * (len(h2)-2))
+    gt   = g["w"] + g["l"]
+    gwr  = f"{round(g['w']/gt*100,1)}%" if gt > 0 else "—"
+    gb   = round(g["best"],  4) if g["best"]  != float("-inf") else "—"
+    gwo  = round(g["worst"], 4) if g["worst"] != float("inf")  else "—"
     icon = "📈" if g["pnl"] >= 0 else "📉"
-    print(f"\n  TOTAL  T:{gt}  W:{g['w']}  L:{g['l']}  WR:{gwr}  "
-          f"{icon} P&L:{round(g['pnl'],4)}  Best:{gb}  Worst:{gwo}")
-    print(f"\n  ⏳ Next candle in {round(sleep_secs)}s  "
-          f"·  Last fetch took {fetch_ms}ms  ·  Ctrl+C to stop\n")
+    pnl_icon = "+" if g["pnl"] >= 0 else ""
+    print(f"  {'TOTAL':<14} {'':8} {gt:>6} {g['w']:>5} {g['l']:>7} "
+          f"{gwr:>6} {icon}{pnl_icon}{round(g['pnl'],4):>11} {str(gb):>10} {str(gwo):>10}")
+
+    # ════════════════════════════════════════════════════════════════
+    # TABLE 3 — TRADE PERFORMANCE LOG
+    # Every completed trade across all symbols, newest first
+    # ════════════════════════════════════════════════════════════════
+
+    # Collect all trades from all symbols and sort newest first
+    all_trades = []
+    for st in states.values():
+        all_trades.extend(st["trade_log"])
+
+    print(f"\n  {'─'*3} TRADE LOG  ({len(all_trades)} completed trades) {'─'*(W-38)}")
+
+    if not all_trades:
+        print("  No completed trades yet this session.\n")
+    else:
+        h3 = (f"  {'#':>3}  {'TIME (IST)':<26} {'SYMBOL':<14} {'DIR':<5} "
+              f"{'ENTRY':>10} {'EXIT':>10} {'P&L':>10} {'%':>6} {'RESULT':<6} {'EXIT BY':<7}")
+        print(h3)
+        print("  " + "─" * (len(h3)-2))
+
+        # Show newest first — reverse chronological
+        for i, t in enumerate(reversed(all_trades), 1):
+            entry  = t["entry"]
+            exit_p = t["exit"]
+            pnl    = t["pnl"]
+            # P&L as percentage of entry
+            pct    = round((pnl / entry) * 100, 2) if entry != 0 else 0
+            result_icon = "✅" if t["result"]=="WIN" else "❌"
+            pnl_sign    = "+" if pnl >= 0 else ""
+
+            print(f"  {i:>3}  {t['time']:<26} {t['symbol']:<14} {t['dir']:<5} "
+                  f"{entry:>10} {exit_p:>10} {pnl_sign}{pnl:>9} "
+                  f"{pnl_sign}{pct:>5}% {result_icon}{t['result']:<5} {t['reason']:<7}")
+
+    print(f"\n  ⏳ Next refresh in {round(sleep_secs)}s  "
+          f"·  Fetch took {fetch_ms}ms  ·  Ctrl+C to stop\n")
+
+
+# ════════════════════════════════════════════════════════════════════
+# SYMBOL CATEGORY SELECTOR
+# Asks user which categories to trade before bot starts.
+# Each category has a fixed symbol list — easy to extend below.
+# ════════════════════════════════════════════════════════════════════
+
+CATEGORIES = {
+    "1": {
+        "name"    : "Indian Indices",
+        "symbols" : ["^NSEI", "^NSEBANK", "^CNXCMDT"],
+        "desc"    : "NIFTY 50, Bank NIFTY, NIFTY Commodities",
+    },
+    "2": {
+        "name"    : "Indian Stocks",
+        "symbols" : ["RELIANCE.NS", "HDFCBANK.NS", "TCS.NS",
+                     "INFY.NS", "MCX.NS", "ICICIBANK.NS"],
+        "desc"    : "Reliance, HDFC Bank, TCS, Infosys, MCX, ICICI Bank",
+    },
+    "3": {
+        "name"    : "Global Commodity Futures",
+        "symbols" : ["GC=F", "SI=F", "CL=F", "NG=F", "HG=F"],
+        "desc"    : "Gold, Silver, Crude Oil, Natural Gas, Copper",
+    },
+    "4": {
+        "name"    : "Crypto",
+        "symbols" : ["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD"],
+        "desc"    : "Bitcoin, Ethereum, Solana, BNB",
+    },
+    "5": {
+        "name"    : "Forex",
+        "symbols" : ["INR=X", "EURUSD=X", "GBPUSD=X", "JPYUSD=X"],
+        "desc"    : "USD/INR, EUR/USD, GBP/USD, JPY/USD",
+    },
+    "6": {
+        "name"    : "US Stocks",
+        "symbols" : ["AAPL", "TSLA", "NVDA", "MSFT", "AMZN"],
+        "desc"    : "Apple, Tesla, Nvidia, Microsoft, Amazon",
+    },
+}
+
+
+def ask_categories() -> list:
+    """
+    Interactively asks user which categories to monitor.
+    Works in both GitHub Actions (non-interactive → uses all) and terminal.
+    Returns a deduplicated list of symbols.
+    """
+
+    # ── GitHub Actions is non-interactive — no stdin available ──────
+    # Detect by checking if we're inside a CI environment.
+    # If yes, skip the prompt and use the SYMBOLS list from settings.
+    if os.getenv("CI") or os.getenv("GITHUB_ACTIONS"):
+        print("  Running on GitHub Actions — using SYMBOLS from settings.")
+        return list(dict.fromkeys(SYMBOLS))
+
+    # ── Interactive prompt (terminal / Colab) ───────────────────────
+    print("\n" + "═" * 60)
+    print("  🤖  TRADING BOT — SELECT CATEGORIES TO MONITOR")
+    print("═" * 60)
+    print("\n  Available categories:\n")
+
+    for key, cat in CATEGORIES.items():
+        syms_preview = ", ".join(cat["symbols"][:3])
+        if len(cat["symbols"]) > 3:
+            syms_preview += f" +{len(cat['symbols'])-3} more"
+        print(f"    {key}.  {cat['name']:<30}  ({syms_preview})")
+
+    print("\n  Enter numbers separated by commas.")
+    print("  Examples:  1        → Indian Indices only")
+    print("             1,2      → Indian Indices + Indian Stocks")
+    print("             1,2,3,4  → Indices + Stocks + Commodities + Crypto")
+    print("             all      → everything\n")
+
+    while True:
+        try:
+            raw = input("  Your choice: ").strip().lower()
+        except EOFError:
+            # Non-interactive fallback
+            print("  Non-interactive — using all categories.")
+            raw = "all"
+
+        if not raw:
+            print("  ⚠️  Nothing entered. Please type a number or 'all'.\n")
+            continue
+
+        selected_symbols = []
+
+        if raw == "all":
+            for cat in CATEGORIES.values():
+                selected_symbols.extend(cat["symbols"])
+            break
+
+        # Parse comma-separated numbers
+        parts   = [p.strip() for p in raw.split(",")]
+        invalid = [p for p in parts if p not in CATEGORIES]
+
+        if invalid:
+            print(f"  ⚠️  Invalid choices: {', '.join(invalid)}")
+            print(f"      Valid options are: {', '.join(CATEGORIES.keys())} or 'all'\n")
+            continue
+
+        for p in parts:
+            selected_symbols.extend(CATEGORIES[p]["symbols"])
+
+        if not selected_symbols:
+            print("  ⚠️  No symbols selected. Try again.\n")
+            continue
+
+        break
+
+    # Deduplicate, preserve order
+    final = list(dict.fromkeys(selected_symbols))
+
+    # Print confirmation
+    print(f"\n  ✅ Selected categories:")
+    chosen_keys = [] if raw == "all" else [p.strip() for p in raw.split(",")]
+    cats_to_show = CATEGORIES.items() if raw == "all" else \
+                   [(k, CATEGORIES[k]) for k in chosen_keys]
+    for k, cat in cats_to_show:
+        print(f"     {cat['name']}: {', '.join(cat['symbols'])}")
+    print(f"\n  Total symbols: {len(final)}")
+    print(f"  {', '.join(final)}")
+    print()
+
+    return final
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -649,14 +850,18 @@ def print_dashboard(states: dict, fetch_ms: int, sleep_secs: float):
 # ════════════════════════════════════════════════════════════════════
 
 def start_bot():
+
+    # ── Ask user which categories to monitor ─────────────────────────
+    selected_symbols = ask_categories()
+
     print(f"\n🚀 Bot starting  ·  {ist_now()}")
-    print(f"   {len(SYMBOLS)} symbols  ·  {MAX_WORKERS} parallel workers")
+    print(f"   {len(selected_symbols)} symbols  ·  {MAX_WORKERS} parallel workers")
     print(f"   MinProb:{MIN_PROBABILITY}%  ATR×{ATR_SL_MULTIPLIER}  "
           f"TP:{int(TP_THRESHOLD*100)}%  MaxLoss:{MAX_DAILY_LOSS}\n")
 
     send_alert(
         f"🤖 Bot Started\n{'─'*28}\n"
-        f"Symbols    : {', '.join(SYMBOLS)}\n"
+        f"Symbols    : {', '.join(selected_symbols)}\n"
         f"Interval   : {INTERVAL}\n"
         f"Workers    : {MAX_WORKERS} parallel\n"
         f"Min Prob   : {MIN_PROBABILITY}%\n"
@@ -665,8 +870,8 @@ def start_bot():
         f"Time (IST) : {ist_now()}"
     )
 
-    # Initialise state — deduplicate symbols preserving order
-    unique_symbols = list(dict.fromkeys(SYMBOLS))
+    # Initialise state — use selected symbols, not hardcoded SYMBOLS list
+    unique_symbols = selected_symbols
     states = {
         sym: dict(
             position     = None,
@@ -683,6 +888,7 @@ def start_bot():
             last_prob    = "—",
             daily_losses = 0,
             last_day     = datetime.now().date(),
+            trade_log    = [],               # list of completed trade dicts
         )
         for sym in unique_symbols
     }
