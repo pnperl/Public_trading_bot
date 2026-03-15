@@ -83,7 +83,7 @@ SYMBOLS = [
 ]
 
 INTERVAL          = "5m"   # candle size — do not change
-MIN_PROBABILITY   = 35     # 0–100. Raise to reduce signals, lower to increase.
+MIN_PROBABILITY   = 55     # 0–100. Raise to reduce signals, lower to increase.
 ATR_SL_MULTIPLIER = 2      # SL width. Try 2.0 if SL hits too often.
 TP_THRESHOLD      = 0.02   # 2% take profit
 MAX_DAILY_LOSS    = 30     # pause symbol after N losses in one day
@@ -325,41 +325,149 @@ def heikin_ashi(df: pd.DataFrame):
 
 # ────────────────────────────────────────────────────────────────────
 # INDICATORS
+#
+# Added vs previous version:
+#   ema50     — slow trend filter (avoid trading against big trend)
+#   macd_bull — MACD line crossed above signal line (momentum confirm)
+#   macd_bear — MACD line crossed below signal line
+#   bb_pos    — Bollinger Band position: -1=below lower, 0=middle, 1=above upper
+#   supertrend_bull — Supertrend indicator bullish (price above band)
+#   supertrend_bear — Supertrend indicator bearish (price below band)
+#   candle_range_pct — current ATR as % of price (filter low-volatility chop)
 # ────────────────────────────────────────────────────────────────────
 
 def compute_indicators(df: pd.DataFrame) -> dict:
-    close = df["Close"].astype("float32")
-    high  = df["High"].astype("float32")
-    low   = df["Low"].astype("float32")
+    close = df["Close"].astype("float64")   # float64 for MACD precision
+    high  = df["High"].astype("float64")
+    low   = df["Low"].astype("float64")
 
-    # RSI 14
-    delta   = close.diff()
-    gain    = delta.clip(lower=0).rolling(14).mean()
-    loss    = (-delta.clip(upper=0)).rolling(14).mean()
-    rs      = gain / loss.replace(0, np.nan)
-    rsi_s   = 100 - 100 / (1 + rs)
-    rsi     = float(rsi_s.iloc[-2]) if pd.notna(rsi_s.iloc[-2]) else 50.0
+    # ── RSI 14 ────────────────────────────────────────────────────
+    delta = close.diff()
+    gain  = delta.clip(lower=0).rolling(14).mean()
+    loss  = (-delta.clip(upper=0)).rolling(14).mean()
+    rs    = gain / loss.replace(0, np.nan)
+    rsi_s = 100 - 100 / (1 + rs)
+    rsi   = float(rsi_s.iloc[-2]) if pd.notna(rsi_s.iloc[-2]) else 50.0
 
-    # ATR 14
+    # ── ATR 14 ────────────────────────────────────────────────────
     pc    = close.shift(1)
     tr    = pd.concat([(high-low),(high-pc).abs(),(low-pc).abs()], axis=1).max(axis=1)
     atr_s = tr.rolling(14).mean()
     atr   = float(atr_s.iloc[-2]) if pd.notna(atr_s.iloc[-2]) else float(tr.mean())
 
-    # EMA 20
-    ema_s = close.ewm(span=20, adjust=False).mean()
-    ema   = float(ema_s.iloc[-2]) if pd.notna(ema_s.iloc[-2]) else float(close.iloc[-2])
+    # ── EMA 20 (fast) and EMA 50 (slow trend filter) ──────────────
+    ema20_s = close.ewm(span=20, adjust=False).mean()
+    ema50_s = close.ewm(span=50, adjust=False).mean()
+    ema20   = float(ema20_s.iloc[-2]) if pd.notna(ema20_s.iloc[-2]) else float(close.iloc[-2])
+    ema50   = float(ema50_s.iloc[-2]) if pd.notna(ema50_s.iloc[-2]) else float(close.iloc[-2])
 
-    # Volume ratio
+    # ── MACD (12,26,9) ────────────────────────────────────────────
+    # macd_bull = MACD line just crossed ABOVE signal line (bullish momentum)
+    # macd_bear = MACD line just crossed BELOW signal line (bearish momentum)
+    ema12      = close.ewm(span=12, adjust=False).mean()
+    ema26      = close.ewm(span=26, adjust=False).mean()
+    macd_line  = ema12 - ema26
+    signal_line= macd_line.ewm(span=9, adjust=False).mean()
+    # Cross at iloc[-2] (confirmed candle)
+    macd_curr  = float(macd_line.iloc[-2])  if pd.notna(macd_line.iloc[-2])   else 0.0
+    macd_prev  = float(macd_line.iloc[-3])  if pd.notna(macd_line.iloc[-3])   else 0.0
+    sig_curr   = float(signal_line.iloc[-2])if pd.notna(signal_line.iloc[-2]) else 0.0
+    sig_prev   = float(signal_line.iloc[-3])if pd.notna(signal_line.iloc[-3]) else 0.0
+    macd_bull  = (macd_prev < sig_prev) and (macd_curr > sig_curr)  # fresh bullish cross
+    macd_bear  = (macd_prev > sig_prev) and (macd_curr < sig_curr)  # fresh bearish cross
+    macd_above = macd_curr > sig_curr    # MACD already above signal (uptrend)
+    macd_below = macd_curr < sig_curr    # MACD already below signal (downtrend)
+
+    # ── Bollinger Bands (20, 2σ) ───────────────────────────────────
+    # bb_pos: where is price relative to bands?
+    #   +1 = above upper band (strong momentum / overbought)
+    #    0 = inside bands (normal)
+    #   -1 = below lower band (strong momentum / oversold)
+    bb_mid   = close.rolling(20).mean()
+    bb_std   = close.rolling(20).std()
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    p        = float(close.iloc[-2])
+    bu       = float(bb_upper.iloc[-2]) if pd.notna(bb_upper.iloc[-2]) else p+1
+    bl       = float(bb_lower.iloc[-2]) if pd.notna(bb_lower.iloc[-2]) else p-1
+    bm       = float(bb_mid.iloc[-2])   if pd.notna(bb_mid.iloc[-2])   else p
+    bb_pos   = 1 if p > bu else (-1 if p < bl else 0)
+    # BB %B: how far price is in the band (0=lower, 1=upper, 0.5=middle)
+    bb_pctb  = (p - bl) / (bu - bl) if (bu - bl) > 0 else 0.5
+
+    # ── Supertrend (ATR×3) ─────────────────────────────────────────
+    # A simple but powerful trend-following indicator.
+    # Bull = price above supertrend line → ride longs
+    # Bear = price below supertrend line → ride shorts
+    st_mult  = 3.0
+    st_atr   = tr.rolling(10).mean()              # 10-period ATR for supertrend
+    hl2      = (high + low) / 2
+    upperband = hl2 + st_mult * st_atr
+    lowerband = hl2 - st_mult * st_atr
+
+    supertrend    = pd.Series(np.nan, index=close.index)
+    st_direction  = pd.Series(1, index=close.index)   # 1=bull, -1=bear
+
+    for i in range(1, len(close)):
+        ub = float(upperband.iloc[i])
+        lb = float(lowerband.iloc[i])
+        prev_ub = float(upperband.iloc[i-1])
+        prev_lb = float(lowerband.iloc[i-1])
+        prev_st = float(supertrend.iloc[i-1]) if pd.notna(supertrend.iloc[i-1]) else lb
+        prev_dir = int(st_direction.iloc[i-1])
+        cp = float(close.iloc[i])
+
+        # Adjust bands
+        lb = lb if lb > prev_lb or float(close.iloc[i-1]) < prev_lb else prev_lb
+        ub = ub if ub < prev_ub or float(close.iloc[i-1]) > prev_ub else prev_ub
+
+        if prev_dir == -1 and cp > prev_st:
+            st_direction.iloc[i] = 1
+            supertrend.iloc[i]   = lb
+        elif prev_dir == 1 and cp < prev_st:
+            st_direction.iloc[i] = -1
+            supertrend.iloc[i]   = ub
+        else:
+            st_direction.iloc[i] = prev_dir
+            supertrend.iloc[i]   = lb if prev_dir == 1 else ub
+
+    st_bull = int(st_direction.iloc[-2]) == 1   # supertrend bullish at last confirmed candle
+    st_bear = int(st_direction.iloc[-2]) == -1
+
+    # ── Volume ratio ──────────────────────────────────────────────
     vol_ratio = 1.0
     if "Volume" in df.columns:
-        vol = df["Volume"].astype("float32")
+        vol = df["Volume"].astype("float64")
         avg = vol.rolling(20).mean().iloc[-2]
         if pd.notna(avg) and avg > 0:
             vol_ratio = float(vol.iloc[-2] / avg)
 
-    del delta, gain, loss, rs, rsi_s, pc, tr, atr_s, ema_s
-    return {"rsi": rsi, "atr": atr, "ema": ema, "vol_ratio": vol_ratio}
+    # ── Candle range as % of price (chop filter) ──────────────────
+    # Low value = choppy / sideways market → avoid trading
+    candle_range_pct = (atr / float(close.iloc[-2]) * 100) if float(close.iloc[-2]) > 0 else 0
+
+    del delta, gain, loss, rs, rsi_s, pc, tr, atr_s
+    del ema12, ema26, macd_line, signal_line
+    del bb_mid, bb_std, bb_upper, bb_lower
+    del st_atr, hl2, upperband, lowerband, supertrend, st_direction
+
+    return {
+        "rsi"             : rsi,
+        "atr"             : atr,
+        "ema"             : ema20,      # kept as "ema" for backward compat
+        "ema20"           : ema20,
+        "ema50"           : ema50,
+        "vol_ratio"       : vol_ratio,
+        "macd_bull"       : macd_bull,
+        "macd_bear"       : macd_bear,
+        "macd_above"      : macd_above,
+        "macd_below"      : macd_below,
+        "bb_pos"          : bb_pos,
+        "bb_pctb"         : bb_pctb,
+        "st_bull"         : st_bull,
+        "st_bear"         : st_bear,
+        "candle_range_pct": candle_range_pct,
+    }
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -393,69 +501,229 @@ def check_signal(ha: pd.DataFrame, doji_thresh: float):
 
 # ────────────────────────────────────────────────────────────────────
 # PROBABILITY SCORING  (0 – 100)
+#
+#  Factor                  Max   Logic
+#  ───────────────────────────────────────────────────────────────────
+#  1. Candle body strength  15   Decisive candle = reliable signal
+#  2. RSI zone              15   Right momentum zone for direction
+#  3. Volume surge          10   Big volume = institutional backing
+#  4. Prior HA trend        10   Clean setup before the reversal
+#  5. EMA20 vs EMA50        15   Short AND long trend alignment
+#  6. MACD confirmation     15   Momentum indicator agrees
+#  7. Supertrend            15   Trend-following filter agrees
+#  8. Bollinger Band        10   Price position in band context
+#  9. Chop filter           -∞   VETO: blocks low-volatility noise
+#  ───────────────────────────────────────────────────────────────────
+#  TOTAL                   105 → capped at 100
+#
+#  Any VETO condition returns score=0 immediately — trade skipped
+#  regardless of other factors.
 # ────────────────────────────────────────────────────────────────────
 
 def compute_probability(ha: pd.DataFrame, ind: dict, direction: str) -> tuple:
-    score = 0
+    score     = 0
     breakdown = {}
-    curr  = ha.iloc[-2]
+    curr      = ha.iloc[-2]
+    price     = float(curr["close"])
 
-    # 1. Candle body strength (0-25)
+    # ── VETO 1: Chop filter ───────────────────────────────────────
+    # If ATR is less than 0.05% of price, market is basically flat.
+    # Trading flat markets = guaranteed SL hit. Block entirely.
+    if ind["candle_range_pct"] < 0.05:
+        breakdown["⛔ CHOP VETO"] = f"ATR only {round(ind['candle_range_pct'],3)}% of price — market too flat"
+        return 0, breakdown
+
+    # ── VETO 2: RSI extreme against direction ─────────────────────
+    # Entering a CALL when RSI>80 = buying at extreme overbought peak
+    # Entering a PUT  when RSI<20 = selling at extreme oversold bottom
+    rsi = ind["rsi"]
+    if direction == "CALL" and rsi > 80:
+        breakdown["⛔ RSI VETO"] = f"RSI={round(rsi,1)} — overbought, too risky for CALL"
+        return 0, breakdown
+    if direction == "PUT" and rsi < 20:
+        breakdown["⛔ RSI VETO"] = f"RSI={round(rsi,1)} — oversold, too risky for PUT"
+        return 0, breakdown
+
+    # ── VETO 3: Supertrend directly against direction ─────────────
+    # Supertrend is bearish but we want CALL = fighting the trend
+    # This is the #1 cause of SL hits — blocked here
+    if direction == "CALL" and ind["st_bear"]:
+        breakdown["⛔ SUPERTREND VETO"] = "Supertrend is BEARISH — no CALL entry"
+        return 0, breakdown
+    if direction == "PUT" and ind["st_bull"]:
+        breakdown["⛔ SUPERTREND VETO"] = "Supertrend is BULLISH — no PUT entry"
+        return 0, breakdown
+
+    # ══ All vetoes passed — begin scoring ════════════════════════
+
+    # 1. Candle body strength (0-15)
     rng      = float(curr["high"]) - float(curr["low"])
     body     = abs(float(curr["close"]) - float(curr["open"]))
     strength = (body / rng) if rng > 0 else 0
-    pts      = min(round(strength * 25), 25)
+    pts      = min(round(strength * 15), 15)
     score   += pts
-    breakdown["Body Strength"] = f"{pts}/25  ({round(strength*100)}% of range)"
+    breakdown["1. Body Strength"] = f"{pts}/15  ({round(strength*100)}% of range)"
 
-    # 2. RSI zone (0-25)
-    rsi = ind["rsi"]
+    # 2. RSI zone (0-15)
     if direction == "CALL":
-        rsi_pts = 25 if 30<=rsi<=60 else (20 if rsi<30 else (10 if rsi<=70 else 0))
+        rsi_pts = 15 if 35<=rsi<=55 else (12 if rsi<35 else (8 if rsi<=65 else (3 if rsi<=75 else 0)))
     else:
-        rsi_pts = 25 if 40<=rsi<=70 else (20 if rsi>70 else (10 if rsi>=30 else 0))
+        rsi_pts = 15 if 45<=rsi<=65 else (12 if rsi>65 else (8 if rsi>=35 else (3 if rsi>=25 else 0)))
     score += rsi_pts
-    breakdown["RSI Zone"] = f"{rsi_pts}/25  (RSI={round(rsi,1)})"
+    breakdown["2. RSI Zone"] = f"{rsi_pts}/15  (RSI={round(rsi,1)})"
 
-    # 3. Volume surge (0-20)
+    # 3. Volume surge (0-10)
     vr      = ind["vol_ratio"]
-    vol_pts = 20 if vr>=2.0 else (15 if vr>=1.5 else (8 if vr>=1.0 else 0))
+    vol_pts = 10 if vr>=2.0 else (8 if vr>=1.5 else (5 if vr>=1.0 else 0))
     score  += vol_pts
-    breakdown["Volume"] = f"{vol_pts}/20  ({round(vr,2)}× avg)"
+    breakdown["3. Volume"] = f"{vol_pts}/10  ({round(vr,2)}× avg)"
 
-    # 4. Prior HA trend (0-20)
+    # 4. Prior HA trend — last 5 candles before flip (0-10)
     if len(ha) >= 7:
         prior     = ha.iloc[-7:-2]
         agree     = int((prior["close"] < prior["open"]).sum()) if direction=="CALL" \
                else int((prior["close"] > prior["open"]).sum())
-        trend_pts = round((agree / 5) * 20)
+        trend_pts = round((agree / 5) * 10)
     else:
         agree, trend_pts = 0, 0
     score += trend_pts
-    breakdown["Prior Trend"] = f"{trend_pts}/20  ({agree}/5 candles)"
+    breakdown["4. Prior Trend"] = f"{trend_pts}/10  ({agree}/5 candles confirm)"
 
-    # 5. Price vs EMA20 (0-10)
-    price   = float(curr["close"])
-    ema_pts = 10 if (direction=="CALL" and price>ind["ema"]) or \
-                    (direction=="PUT"  and price<ind["ema"]) else 0
-    score  += ema_pts
-    breakdown["EMA20"] = f"{ema_pts}/10  (price={round(price,4)}, EMA={round(ind['ema'],4)})"
+    # 5. EMA alignment: EMA20 vs EMA50 (0-15)
+    # Best case: both EMAs agree with direction AND have good separation
+    ema20 = ind["ema20"]
+    ema50 = ind["ema50"]
+    ema_sep_pct = abs(ema20 - ema50) / ema50 * 100 if ema50 > 0 else 0
+
+    if direction == "CALL":
+        if price > ema20 > ema50:                   # price above both, EMA20>EMA50 = strong uptrend
+            ema_pts = 15 if ema_sep_pct > 0.3 else 10
+        elif price > ema20:                          # price above fast EMA only
+            ema_pts = 8
+        elif price > ema50:                          # above slow EMA only
+            ema_pts = 4
+        else:                                        # price below both EMAs
+            ema_pts = 0
+    else:
+        if price < ema20 < ema50:                   # strong downtrend
+            ema_pts = 15 if ema_sep_pct > 0.3 else 10
+        elif price < ema20:
+            ema_pts = 8
+        elif price < ema50:
+            ema_pts = 4
+        else:
+            ema_pts = 0
+    score += ema_pts
+    breakdown["5. EMA Alignment"] = (f"{ema_pts}/15  "
+        f"(EMA20={round(ema20,2)}, EMA50={round(ema50,2)}, sep={round(ema_sep_pct,2)}%)")
+
+    # 6. MACD confirmation (0-15)
+    # Fresh cross = strongest signal. Already in direction = medium. Against = 0.
+    if direction == "CALL":
+        if ind["macd_bull"]:    macd_pts = 15    # just crossed bullish — best
+        elif ind["macd_above"]: macd_pts = 8     # already above — ok
+        else:                   macd_pts = 0     # bearish MACD — poor
+    else:
+        if ind["macd_bear"]:    macd_pts = 15
+        elif ind["macd_below"]: macd_pts = 8
+        else:                   macd_pts = 0
+    score += macd_pts
+    cross_str = "FRESH CROSS" if (ind["macd_bull"] if direction=="CALL" else ind["macd_bear"]) \
+           else ("aligned" if macd_pts > 0 else "against")
+    breakdown["6. MACD"] = f"{macd_pts}/15  ({cross_str})"
+
+    # 7. Supertrend (0-15)
+    # Already passed the VETO (no opposing supertrend), so either
+    # supertrend matches or it's neutral/transitioning
+    if (direction=="CALL" and ind["st_bull"]) or (direction=="PUT" and ind["st_bear"]):
+        st_pts = 15
+        st_str = "aligned ✅"
+    else:
+        st_pts = 0
+        st_str = "neutral"
+    score += st_pts
+    breakdown["7. Supertrend"] = f"{st_pts}/15  ({st_str})"
+
+    # 8. Bollinger Band position (0-10)
+    bb_pctb = ind["bb_pctb"]
+    if direction == "CALL":
+        # Best: price near lower band (oversold in band) = bounce setup
+        if   bb_pctb < 0.2:  bb_pts = 10   # near lower band — reversal zone
+        elif bb_pctb < 0.5:  bb_pts = 6    # lower half — good
+        elif bb_pctb < 0.8:  bb_pts = 3    # upper half — ok
+        else:                bb_pts = 0    # near upper band — stretched
+    else:
+        if   bb_pctb > 0.8:  bb_pts = 10
+        elif bb_pctb > 0.5:  bb_pts = 6
+        elif bb_pctb > 0.2:  bb_pts = 3
+        else:                bb_pts = 0
+    score += bb_pts
+    breakdown["8. BB Position"] = f"{bb_pts}/10  (%B={round(bb_pctb,2)})"
+
+    # Cap at 100
+    score = min(score, 100)
 
     return score, breakdown
 
 
 # ────────────────────────────────────────────────────────────────────
-# STOP LOSS
+# SMART TRAILING STOP LOSS  — 3-phase system
+#
+# The #1 cause of SL hits is a fixed-distance SL that never adapts.
+# This system tightens the SL progressively as profit grows:
+#
+#  Phase 1 — PROTECTION (0% to 0.5% profit)
+#    SL stays at ATR × 2.0 from current price.
+#    Give trade room to breathe. Don't get shaken out by noise.
+#
+#  Phase 2 — BREAKEVEN+ (0.5% to 1% profit)
+#    SL moves to entry + 0.1% (slightly above breakeven).
+#    Trade can no longer result in a loss.
+#
+#  Phase 3 — LOCK-IN (> 1% profit)
+#    SL trails at ATR × 1.0 from current price.
+#    Aggressively locks in profit as price moves in our favour.
+#    Half the distance of Phase 1 = much tighter trail.
+#
+# Result: SL never moves backward. Trade either hits TP or
+# exits with a locked-in profit once 1% is reached.
 # ────────────────────────────────────────────────────────────────────
 
-def calc_sl(price: float, atr: float, direction: str) -> float:
-    return price-(atr*ATR_SL_MULTIPLIER) if direction=="CALL" \
-      else price+(atr*ATR_SL_MULTIPLIER)
+def calc_initial_sl(price: float, atr: float, direction: str) -> float:
+    """Initial SL at entry — wide enough to avoid early noise."""
+    mult = ATR_SL_MULTIPLIER           # from settings (default 2.0)
+    return price - atr * mult if direction == "CALL" \
+      else price + atr * mult
 
 
-def trail_sl(current_sl: float, price: float, atr: float, direction: str) -> float:
-    new_sl = calc_sl(price, atr, direction)
-    return max(current_sl, new_sl) if direction=="CALL" else min(current_sl, new_sl)
+def smart_trail_sl(current_sl: float, price: float, entry: float,
+                   atr: float, direction: str) -> float:
+    """
+    Adjust trailing SL based on how much profit we have.
+    SL only ever moves in the profitable direction — never backwards.
+    """
+    if direction == "CALL":
+        profit_pct = (price - entry) / entry * 100
+        if profit_pct >= 1.0:
+            # Phase 3: tight trail — lock in profit
+            new_sl = price - atr * 1.0
+        elif profit_pct >= 0.5:
+            # Phase 2: move to breakeven + tiny buffer
+            new_sl = entry * 1.001
+        else:
+            # Phase 1: wide trail — give room to breathe
+            new_sl = price - atr * ATR_SL_MULTIPLIER
+        return max(current_sl, new_sl)   # never move SL down
+
+    else:  # PUT
+        profit_pct = (entry - price) / entry * 100
+        if profit_pct >= 1.0:
+            new_sl = price + atr * 1.0
+        elif profit_pct >= 0.5:
+            new_sl = entry * 0.999
+        else:
+            new_sl = price + atr * ATR_SL_MULTIPLIER
+        return min(current_sl, new_sl)   # never move SL up
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -503,9 +771,18 @@ def process_symbol(sym: str, df: pd.DataFrame, st: dict) -> None:
         entry = st["entry_price"]
         pos   = st["position"]
 
-        st["trailing_sl"] = trail_sl(st["trailing_sl"], price, ind["atr"], pos)
+        # Smart trailing SL — phases based on profit %
+        st["trailing_sl"] = smart_trail_sl(
+            st["trailing_sl"], price, entry, ind["atr"], pos
+        )
 
+        # Profit % for TP check and phase display
         p_pct = (price-entry)/entry if pos=="CALL" else (entry-price)/entry
+
+        # Determine which SL phase we're in (for dashboard)
+        if p_pct*100 >= 1.0:  st["sl_phase"] = "3-LOCK"
+        elif p_pct*100 >= 0.5: st["sl_phase"] = "2-BEVEN"
+        else:                  st["sl_phase"] = "1-PROT"
 
         exit_reason = None
         if   p_pct >= TP_THRESHOLD:                      exit_reason = "✅ TAKE PROFIT HIT"
@@ -561,7 +838,8 @@ def process_symbol(sym: str, df: pd.DataFrame, st: dict) -> None:
             if score >= MIN_PROBABILITY:
                 st["position"]    = signal
                 st["entry_price"] = price
-                st["trailing_sl"] = calc_sl(price, ind["atr"], signal)
+                st["trailing_sl"] = calc_initial_sl(price, ind["atr"], signal)
+                st["sl_phase"]    = "1-PROT"
                 strike = st["profile"]["strike"]
                 atm    = round(price/strike)*strike if strike > 0 else price
 
@@ -614,7 +892,8 @@ def print_dashboard(states: dict, fetch_ms: int, sleep_secs: float):
     # ════════════════════════════════════════════════════════════════
     print(f"  {'─'*3} LIVE POSITIONS {'─'*(W-21)}")
     h1 = (f"  {'SYMBOL':<14} {'TYPE':<8} {'MKT':<7} {'POS':<5} "
-          f"{'ENTRY':>10} {'PRICE':>12} {'UNREAL':>10} {'PROB':>6} {'SL':>12}")
+          f"{'ENTRY':>10} {'PRICE':>12} {'UNREAL':>10} {'PROB':>6} "
+          f"{'SL':>12} {'PHASE':<8}")
     print(h1)
     print("  " + "─" * (len(h1)-2))
 
@@ -626,6 +905,7 @@ def print_dashboard(states: dict, fetch_ms: int, sleep_secs: float):
         price   = st["latest_price"]
         prob    = str(st.get("last_prob","—"))
         sl      = st["trailing_sl"]
+        phase   = st.get("sl_phase","—") if pos != "—" else "—"
         entry_d = f"{round(entry,4)}"  if entry else "—"
         sl_d    = f"{round(sl,4)}"     if sl    else "—"
         pause   = " ⏸" if st["daily_losses"] >= MAX_DAILY_LOSS else ""
@@ -637,7 +917,8 @@ def print_dashboard(states: dict, fetch_ms: int, sleep_secs: float):
         u_str  = f"{u_icon}{abs(round(unreal,4))}"
 
         print(f"  {sym:<14} {typ:<8} {mkt:<7} {pos:<5} "
-              f"{entry_d:>10} {round(price,4):>12} {u_str:>10} {prob:>6} {sl_d:>12}{pause}")
+              f"{entry_d:>10} {round(price,4):>12} {u_str:>10} {prob:>6} "
+              f"{sl_d:>12} {phase:<8}{pause}")
 
     # ════════════════════════════════════════════════════════════════
     # TABLE 2 — SYMBOL PERFORMANCE SUMMARY
@@ -886,6 +1167,7 @@ def start_bot():
             worst        = float("inf"),
             last_time    = None,
             last_prob    = "—",
+            sl_phase     = "—",
             daily_losses = 0,
             last_day     = datetime.now().date(),
             trade_log    = [],               # list of completed trade dicts
