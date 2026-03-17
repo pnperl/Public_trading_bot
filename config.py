@@ -172,15 +172,15 @@ MAX_WORKERS  = 5
 GITHUB_ACTIONS_SYMBOLS = [
     "^NSEI",
     "^NSEBANK",
-    "^CNXCMDT",
-    "RELIANCE.NS",
-    "HDFCBANK.NS",
+    #"^CNXCMDT",
+    #"RELIANCE.NS",
+    #"HDFCBANK.NS",
     #"GC=F",
     #"SI=F",
-    "CL=F",
-    "YM=F",         # Dow Futures
-    "ES=F",         # S&P 500 Futures
+    #"CL=F",
+    #"YM=F",         # Dow Futures
+    #"ES=F",         # S&P 500 Futures
     #"BTC-USD",
     #"ETH-USD",
-    "INR=X",
+    #"INR=X",
 ]
