@@ -339,12 +339,20 @@ def score_strategy_a(ha: pd.DataFrame, ind: dict, direction: str) -> tuple:
     breakdown = {}
     curr  = ha.iloc[-2]
 
-    # 1. Candle body strength (0-40)
-    rng      = float(curr["high"]) - float(curr["low"])
-    body     = abs(float(curr["close"]) - float(curr["open"]))
+    # ── Minimum body veto ─────────────────────────────────────────
+    # Live observation: a 22% body candle produced a score of 56
+    # and a bad trade. Block candles with body < 25% of range.
+    # These are near-doji candles — unreliable reversal signals.
+    rng  = float(curr["high"]) - float(curr["low"])
+    body = abs(float(curr["close"]) - float(curr["open"]))
     strength = (body / rng) if rng > 0 else 0
-    pts      = min(round(strength * 40), 40)
-    score   += pts
+    if strength < 0.25:
+        breakdown["⛔ BODY VETO"] = f"Body only {round(strength*100)}% of range — too weak"
+        return 0, breakdown
+
+    # 1. Candle body strength (0-40)
+    pts    = min(round(strength * 40), 40)
+    score += pts
     breakdown["Body Strength"] = f"{pts}/40  ({round(strength*100)}% of range)"
 
     # 2. RSI zone (0-35)
@@ -356,16 +364,18 @@ def score_strategy_a(ha: pd.DataFrame, ind: dict, direction: str) -> tuple:
     score += rsi_pts
     breakdown["RSI Zone"] = f"{rsi_pts}/35  (RSI={round(rsi,1)})"
 
-    # 3. Prior HA trend — last 4 candles (0-25)
-    if len(ha) >= 6:
-        prior     = ha.iloc[-6:-2]
+    # 3. Prior HA trend — last 5 candles (raised from 4 to 5 for cleaner setups)
+    # Live observation: 2/4 prior trend agreement is too noisy.
+    # Requiring 5 lookback candles gives a cleaner picture.
+    if len(ha) >= 7:
+        prior     = ha.iloc[-7:-2]
         agree     = int((prior["close"] < prior["open"]).sum()) if direction=="CALL" \
                else int((prior["close"] > prior["open"]).sum())
-        trend_pts = round((agree / 4) * 25)
+        trend_pts = round((agree / 5) * 25)
     else:
         agree, trend_pts = 0, 0
     score += trend_pts
-    breakdown["Prior Trend"] = f"{trend_pts}/25  ({agree}/4 candles)"
+    breakdown["Prior Trend"] = f"{trend_pts}/25  ({agree}/5 candles)"
 
     return min(score, 100), breakdown
 
@@ -392,6 +402,14 @@ def score_strategy_b(ha: pd.DataFrame, ind: dict, direction: str) -> tuple:
         return 0, {"⛔ ST VETO": "Supertrend BEARISH — no CALL"}
     if direction == "PUT"  and ind["st_bull"]:
         return 0, {"⛔ ST VETO": "Supertrend BULLISH — no PUT"}
+    # BB stretch veto: Live observation showed CALL entered at %B=0.88
+    # (price near upper band). Entering a CALL when price is already
+    # stretched to the upper band risks buying at the top.
+    # Block CALL when %B > 0.85 and PUT when %B < 0.15.
+    if direction == "CALL" and ind["bb_pctb"] > 0.85:
+        return 0, {"⛔ BB VETO": f"Price at {round(ind['bb_pctb']*100)}% of BB — too stretched for CALL"}
+    if direction == "PUT"  and ind["bb_pctb"] < 0.15:
+        return 0, {"⛔ BB VETO": f"Price at {round(ind['bb_pctb']*100)}% of BB — too stretched for PUT"}
 
     # ── 1. Candle body strength (0-15) ────────────────────────────
     rng      = float(curr["high"]) - float(curr["low"])
