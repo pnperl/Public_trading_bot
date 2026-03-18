@@ -114,10 +114,11 @@ STRATEGY_A = {
     ),
 
     # ── Entry filter ────────────────────────────────────────────
-    # MIN_PROBABILITY for classic strategy is set low because the
-    # classic strategy uses a simpler 3-factor score (no MACD/BB/ST).
-    # Setting to 0 means it enters on every clean HA flip.
-    "min_probability"  : 0,         # 0 = enter on every HA reversal
+    # Raised from 0 to 30 after live observation showed 22% body
+    # candles (score ~56) were generating very weak signals.
+    # 30 acts as a minimum quality gate — still enters most HA flips
+    # but blocks the very worst (tiny body, no prior trend agreement).
+    "min_probability"  : 30,        # 0 = all flips, 30 = minimum quality gate
 
     # ── Stop loss ────────────────────────────────────────────────
     # Classic strategy: fixed ATR multiplier SL, no phase trailing
@@ -172,12 +173,12 @@ MAX_WORKERS  = 5
 GITHUB_ACTIONS_SYMBOLS = [
     "^NSEI",
     "^NSEBANK",
-    #"^CNXCMDT",
+    "^CNXCMDT",
     #"RELIANCE.NS",
     #"HDFCBANK.NS",
     #"GC=F",
     #"SI=F",
-    #"CL=F",
+    "CL=F",
     #"YM=F",         # Dow Futures
     #"ES=F",         # S&P 500 Futures
     #"BTC-USD",
