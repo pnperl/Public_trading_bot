@@ -1,35 +1,119 @@
-#════════════════════════════════════════════════════════════════════
-# GITHUB ACTIONS WORKFLOW
-# ────────────────────────────────────────────────────────────────────
-# Save this as:  .github/workflows/run_bot.yml
-# in your GitHub repo (create the folders if they don't exist)
-# ════════════════════════════════════════════════════════════════════
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  .github/workflows/run_bot.yml                                  ║
+# ║                                                                  ║
+# ║  Save this file at exactly this path in your GitHub repo:       ║
+# ║  .github/workflows/run_bot.yml                                  ║
+# ║                                                                  ║
+# ║  TWO SEPARATE JOBS — Indian Indices/Stocks + MCX Commodities    ║
+# ║                                                                  ║
+# ║  Job 1 — indian_indices_stocks                                  ║
+# ║    Symbols : ^NSEI, ^NSEBANK, ^CNXCMDT,                        ║
+# ║              RELIANCE.NS, HDFCBANK.NS, TCS.NS, INFY.NS, MCX.NS ║
+# ║    Market  : NSE  09:15 – 15:30 IST                             ║
+# ║    Cron    : 03:30 UTC (= 09:00 AM IST, 15 min before open)     ║
+# ║    Timeout : 390 min (ends ~15:30 IST with 15 min buffer)       ║
+# ║                                                                  ║
+# ║  Job 2 — mcx_commodities                                        ║
+# ║    Symbols : GC=F, SI=F, CL=F, NG=F, HG=F                      ║
+# ║    Market  : MCX  09:00 – 23:30 IST                             ║
+# ║    Cron    : 03:30 UTC (= 09:00 AM IST, exactly at MCX open)    ║
+# ║    Timeout : 890 min (ends ~23:30 IST, covers full MCX day)     ║
+# ║                                                                  ║
+# ║  GitHub Free Tier usage per day (Mon–Fri):                      ║
+# ║    Job 1 : 390 min                                               ║
+# ║    Job 2 : 890 min                                               ║
+# ║    Total : 1,280 min/day × 22 trading days = ~28,160 min/month  ║
+# ║    Free tier: public repo = UNLIMITED minutes ✅                 ║
+# ╚══════════════════════════════════════════════════════════════════╝
 
- name: Trading Bot
+name: Trading Bot
 
- on:
-   schedule:
-     - cron: '30 3 * * 1-5'    # 9:00 AM IST = 3:30 AM UTC, Mon-Fri only
-   workflow_dispatch:            # adds a manual Run button in GitHub UI
+on:
+  schedule:
+    # Both jobs start at the same time:
+    # 03:30 UTC = 09:00 AM IST
+    # MCX opens at 09:00, NSE opens at 09:15
+    # Bot's is_market_open() handles the 15-min wait for NSE internally
+    - cron: '30 3 * * 1-5'
 
- jobs:
-   run-bot:
-     runs-on: ubuntu-latest
-     timeout-minutes: 370        # auto-kills after ~6hrs = around 3:10 PM IST
+  workflow_dispatch:
+    # Adds a manual "Run workflow" button in GitHub Actions tab
+    # Use this to test or restart the bot any time
 
-     steps:
-       - uses: actions/checkout@v4
 
-       - name: Set up Python
-         uses: actions/setup-python@v5
-         with:
-           python-version: '3.11'
+jobs:
 
-       - name: Install dependencies
-         run: pip install yfinance pandas numpy requests python-dotenv -q
+  # ════════════════════════════════════════════════════════════════
+  # JOB 1 — INDIAN INDICES AND STOCKS
+  #
+  # Market hours: NSE 09:15 AM – 03:30 PM IST (Mon–Fri)
+  # Cron fires : 03:30 UTC = 09:00 AM IST (15 min before NSE open)
+  # Bot waits  : is_market_open() returns False until 09:15
+  #              Bot prints "All markets closed — sleeping 60s"
+  #              and checks again every 60s until NSE opens
+  # Killed at  : 03:30 UTC + 390 min = 10:00 UTC = 15:30 IST ✅
+  # ════════════════════════════════════════════════════════════════
+  indian_indices_stocks:
+    name: "Job 1 — Indian Indices & Stocks (09:15–15:30 IST)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 390
 
-       - name: Run bot
-         env:
-           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-           CHAT_ID: ${{ secrets.CHAT_ID }}
-         run: python trading_bot_reviewed.py
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install yfinance pandas numpy requests python-dotenv -q
+
+      - name: Run bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID:        ${{ secrets.CHAT_ID }}
+          # Comma-separated symbols for this job only.
+          # Bot reads BOT_SYMBOLS first, ignores config.py for symbols.
+          BOT_SYMBOLS:   "^NSEI,^NSEBANK,^CNXCMDT,RELIANCE.NS,HDFCBANK.NS,TCS.NS,INFY.NS,MCX.NS"
+          BOT_JOB_NAME:  "Indian Indices & Stocks"
+        run: python trading_bot_reviewed.py
+
+
+  # ════════════════════════════════════════════════════════════════
+  # JOB 2 — MCX COMMODITIES
+  #
+  # Market hours: MCX 09:00 AM – 11:30 PM IST (Mon–Fri)
+  # Cron fires : 03:30 UTC = 09:00 AM IST (exactly at MCX open)
+  # Killed at  : 03:30 UTC + 890 min = 18:20 UTC = 23:50 IST
+  #              (20 min after MCX closes at 23:30) ✅
+  #
+  # Note: GC=F, SI=F etc. are GLOBAL commodity futures traded on
+  # US exchanges — yfinance provides their data 24h. We monitor
+  # them during MCX hours since MCX prices track them closely.
+  # ════════════════════════════════════════════════════════════════
+  mcx_commodities:
+    name: "Job 2 — MCX Commodities (09:00–23:30 IST)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 890
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install yfinance pandas numpy requests python-dotenv -q
+
+      - name: Run bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID:        ${{ secrets.CHAT_ID }}
+          BOT_SYMBOLS:   "GC=F,SI=F,CL=F,NG=F,HG=F"
+          BOT_JOB_NAME:  "MCX Commodities"
+        run: python trading_bot_reviewed.py
