@@ -1,62 +1,67 @@
 # ╔══════════════════════════════════════════════════════════════════╗
 # ║  .github/workflows/run_bot.yml                                  ║
 # ║                                                                  ║
-# ║  Save this file at exactly this path in your GitHub repo:       ║
-# ║  .github/workflows/run_bot.yml                                  ║
+# ║  FIXES IN THIS VERSION:                                         ║
+# ║  1. Cron moved 30 min earlier (08:30 IST instead of 09:00)      ║
+# ║     GitHub Actions cron can delay up to 30–60 min.             ║
+# ║     Starting earlier guarantees bot is up before 09:15 NSE.    ║
+# ║     Bot's is_market_open() handles the early wait internally.  ║
 # ║                                                                  ║
-# ║  TWO SEPARATE JOBS — Indian Indices/Stocks + MCX Commodities    ║
+# ║  2. concurrency group added to BOTH jobs                        ║
+# ║     Prevents duplicate runs if:                                 ║
+# ║       • You click Run workflow while scheduled run is active    ║
+# ║       • GitHub fires cron twice (rare but happens)              ║
+# ║       • Old workflow file triggers alongside this one           ║
+# ║     cancel-in-progress: false — new run is queued, not killed   ║
+# ║     (so you never lose a running session by accident)           ║
 # ║                                                                  ║
-# ║  Job 1 — indian_indices_stocks                                  ║
-# ║    Symbols : ^NSEI, ^NSEBANK, ^CNXCMDT,                        ║
-# ║              RELIANCE.NS, HDFCBANK.NS, TCS.NS, INFY.NS, MCX.NS ║
-# ║    Market  : NSE  09:15 – 15:30 IST                             ║
-# ║    Cron    : 03:30 UTC (= 09:00 AM IST, 15 min before open)     ║
-# ║    Timeout : 390 min (ends ~15:30 IST with 15 min buffer)       ║
+# ║  3. Zero symbol overlap between Job 1 and Job 2                 ║
+# ║     Each symbol appears in exactly ONE job.                     ║
+# ║     Prevents same signal being sent twice from two jobs.        ║
 # ║                                                                  ║
-# ║  Job 2 — mcx_commodities                                        ║
-# ║    Symbols : GC=F, SI=F, CL=F, NG=F, HG=F                      ║
-# ║    Market  : MCX  09:00 – 23:30 IST                             ║
-# ║    Cron    : 03:30 UTC (= 09:00 AM IST, exactly at MCX open)    ║
-# ║    Timeout : 890 min (ends ~23:30 IST, covers full MCX day)     ║
-# ║                                                                  ║
-# ║  GitHub Free Tier usage per day (Mon–Fri):                      ║
-# ║    Job 1 : 390 min                                               ║
-# ║    Job 2 : 890 min                                               ║
-# ║    Total : 1,280 min/day × 22 trading days = ~28,160 min/month  ║
-# ║    Free tier: public repo = UNLIMITED minutes ✅                 ║
+# ║  SCHEDULE:                                                       ║
+# ║  Cron   : 03:00 UTC = 08:30 AM IST  (30 min buffer for delay)  ║
+# ║  Job 1  : Indian Indices & Stocks → auto-kills at 03:45 PM IST ║
+# ║  Job 2  : MCX Commodities         → auto-kills at 11:45 PM IST ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 name: Trading Bot
 
 on:
   schedule:
-    # Both jobs start at the same time:
-    # 03:30 UTC = 09:00 AM IST
-    # MCX opens at 09:00, NSE opens at 09:15
-    # Bot's is_market_open() handles the 15-min wait for NSE internally
-    - cron: '30 3 * * 1-5'
+    # 03:00 UTC = 08:30 AM IST
+    # 30 min earlier than 09:00 IST to absorb GitHub cron delays.
+    # Bot waits in is_market_open() loop until actual market open.
+    - cron: '0 3 * * 1-5'
 
   workflow_dispatch:
-    # Adds a manual "Run workflow" button in GitHub Actions tab
-    # Use this to test or restart the bot any time
+    # Manual Run button in GitHub Actions tab.
+    # concurrency group below ensures this cancels any
+    # queued duplicate rather than running alongside it.
 
 
 jobs:
 
   # ════════════════════════════════════════════════════════════════
   # JOB 1 — INDIAN INDICES AND STOCKS
+  # NSE: 09:15 AM – 03:30 PM IST
   #
-  # Market hours: NSE 09:15 AM – 03:30 PM IST (Mon–Fri)
-  # Cron fires : 03:30 UTC = 09:00 AM IST (15 min before NSE open)
-  # Bot waits  : is_market_open() returns False until 09:15
-  #              Bot prints "All markets closed — sleeping 60s"
-  #              and checks again every 60s until NSE opens
-  # Killed at  : 03:30 UTC + 390 min = 10:00 UTC = 15:30 IST ✅
+  # Cron  : 03:00 UTC = 08:30 IST (45 min before NSE open)
+  # Kill  : 03:00 UTC + 435 min = 03:45 PM IST (15 min after close)
+  # Wait  : Bot sleeps 60s loops from 08:30 to 09:15 (45 min wait)
+  #         is_market_open() returns False → "All markets closed"
   # ════════════════════════════════════════════════════════════════
   indian_indices_stocks:
     name: "Job 1 — Indian Indices & Stocks (09:15–15:30 IST)"
     runs-on: ubuntu-latest
-    timeout-minutes: 390
+    timeout-minutes: 435
+
+    # Concurrency group: only ONE instance of this job runs at a time.
+    # If a new trigger fires while this is running, it waits in queue.
+    # cancel-in-progress: false = never kill a running bot session.
+    concurrency:
+      group: india-job
+      cancel-in-progress: false
 
     steps:
       - name: Checkout code
@@ -74,29 +79,30 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID:        ${{ secrets.CHAT_ID }}
-          # Comma-separated symbols for this job only.
-          # Bot reads BOT_SYMBOLS first, ignores config.py for symbols.
-          BOT_SYMBOLS:   "^NSEI,^NSEBANK,^CNXCMDT,RELIANCE.NS,HDFCBANK.NS,TCS.NS,INFY.NS,MCX.NS"
-          BOT_JOB_NAME:  "Indian Indices & Stocks"
+          BOT_SYMBOLS:    "^NSEI,^NSEBANK,^CNXCMDT,RELIANCE.NS,HDFCBANK.NS,TCS.NS,INFY.NS,MCX.NS"
+          BOT_JOB_NAME:   "Indian Indices & Stocks"
         run: python trading_bot_reviewed.py
 
 
   # ════════════════════════════════════════════════════════════════
   # JOB 2 — MCX COMMODITIES
+  # MCX: 09:00 AM – 11:30 PM IST
   #
-  # Market hours: MCX 09:00 AM – 11:30 PM IST (Mon–Fri)
-  # Cron fires : 03:30 UTC = 09:00 AM IST (exactly at MCX open)
-  # Killed at  : 03:30 UTC + 890 min = 18:20 UTC = 23:50 IST
-  #              (20 min after MCX closes at 23:30) ✅
-  #
-  # Note: GC=F, SI=F etc. are GLOBAL commodity futures traded on
-  # US exchanges — yfinance provides their data 24h. We monitor
-  # them during MCX hours since MCX prices track them closely.
+  # Cron  : 03:00 UTC = 08:30 IST (exactly 30 min before MCX open)
+  # Kill  : 03:00 UTC + 915 min = 11:45 PM IST (15 min after close)
+  # Note  : GC=F, CL=F etc are global futures — yfinance gives 24h
+  #         data. is_market_open() returns True for FUTURES always
+  #         on weekdays, so these process immediately from 08:30.
+  #         This is fine — signals before 09:00 are valid for MCX.
   # ════════════════════════════════════════════════════════════════
   mcx_commodities:
     name: "Job 2 — MCX Commodities (09:00–23:30 IST)"
     runs-on: ubuntu-latest
-    timeout-minutes: 890
+    timeout-minutes: 915
+
+    concurrency:
+      group: mcx-job
+      cancel-in-progress: false
 
     steps:
       - name: Checkout code
@@ -114,6 +120,6 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID:        ${{ secrets.CHAT_ID }}
-          BOT_SYMBOLS:   "GC=F,SI=F,CL=F,NG=F,HG=F"
-          BOT_JOB_NAME:  "MCX Commodities"
+          BOT_SYMBOLS:    "GC=F,SI=F,CL=F,NG=F,HG=F"
+          BOT_JOB_NAME:   "MCX Commodities"
         run: python trading_bot_reviewed.py
