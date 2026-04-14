@@ -86,7 +86,9 @@ def detect_profile(symbol: str) -> dict:
 def is_market_open(profile: dict) -> bool:
     tz     = ZoneInfo(profile["tz"])
     now_tz = datetime.now(tz)
-    if profile["type"] not in ("CRYPTO","FOREX") and now_tz.weekday() >= 5:
+    # Crypto trades 24/7. Forex, stocks, indices and futures are
+    # considered closed on weekends.
+    if profile["type"] != "CRYPTO" and now_tz.weekday() >= 5:
         return False
     if profile["hours"] is None or profile["type"] == "FUTURES":
         return True
@@ -1020,7 +1022,8 @@ def start_bot():
 # ════════════════════════════════════════════════════════════════════
 # START
 # ════════════════════════════════════════════════════════════════════
-start_bot()
+if __name__ == "__main__":
+    start_bot()
 
 
 # ════════════════════════════════════════════════════════════════════
