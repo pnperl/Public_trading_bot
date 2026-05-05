@@ -101,18 +101,42 @@ def is_market_open(profile: dict) -> bool:
 def ist_now() -> str:
     return datetime.now(IST).strftime("%d-%b-%Y %I:%M:%S %p IST")
 
-def send_alert(msg: str):
+def _telegram_request(method: str, payload: dict):
     if not TOKEN or not CHAT_ID:
-        print(f"[ALERT] {msg}")
-        return
+        print(f"[ALERT:{method}] {payload.get('text', '')}")
+        return None
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg},
-            timeout=5
+        r = requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/{method}",
+            data=payload,
+            timeout=8
         )
+        data = r.json() if r.content else {}
+        if not r.ok or not data.get("ok", False):
+            print(f"⚠️  Telegram API error [{method}]: {data}")
+            return None
+        return data.get("result")
     except Exception as e:
-        print(f"⚠️  Telegram error: {e}")
+        print(f"⚠️  Telegram error [{method}]: {e}")
+        return None
+
+
+def send_alert(msg: str):
+    result = _telegram_request(
+        "sendMessage",
+        {"chat_id": CHAT_ID, "text": msg}
+    )
+    if not result:
+        return None
+    return result.get("message_id")
+
+
+def edit_alert(message_id: int, msg: str) -> bool:
+    result = _telegram_request(
+        "editMessageText",
+        {"chat_id": CHAT_ID, "message_id": message_id, "text": msg}
+    )
+    return result is not None
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -903,8 +927,10 @@ def start_bot():
         for key in STRATEGIES
     }
 
-    fetch_ms        = 0
-    last_alert_hour = -1
+    fetch_ms          = 0
+    last_alert_hour   = -1
+    hourly_message_id = None
+    hourly_message_day = datetime.now(IST).date()
 
     while True:
         cycle_start = time.time()
@@ -986,7 +1012,11 @@ def start_bot():
             time.sleep(60)
             continue
 
-        # Hourly comparison — exactly once per hour (not once per minute-zero)
+        # Hourly comparison — keep a single Telegram message per IST day and edit it each hour
+        if now_ist.date() != hourly_message_day:
+            hourly_message_day = now_ist.date()
+            hourly_message_id = None
+
         if now_ist.hour != last_alert_hour:
             last_alert_hour = now_ist.hour
             pnl_a = sum(all_states["A"][s]["pnl"] for s in selected_symbols)
@@ -998,9 +1028,11 @@ def start_bot():
             t_a = w_a + l_a;  t_b = w_b + l_b
             wr_a = f"{round(w_a/t_a*100,1)}%" if t_a > 0 else "—"
             wr_b = f"{round(w_b/t_b*100,1)}%" if t_b > 0 else "—"
-            lead = "A leads 🏆" if pnl_a>pnl_b else ("B leads 🏆" if pnl_b>pnl_a else "TIE")
-            send_alert(
-                f"📊 Hourly Comparison\n{'─'*32}\n"
+            lead = "A leads 🏆" if pnl_a > pnl_b else ("B leads 🏆" if pnl_b > pnl_a else "TIE")
+            hourly_msg = (
+                f"📊 Hourly Comparison (Live Day Card)\n{'─'*32}\n"
+                f"Date   : {now_ist.strftime('%d-%b-%Y')} IST\n"
+                f"Hour   : {now_ist.strftime('%I:00 %p')} IST\n"
                 f"[A] {STRATEGY_A['short_name']}\n"
                 f"    T:{t_a}  W:{w_a}  L:{l_a}  WR:{wr_a}  P&L:{round(pnl_a,2)}\n"
                 f"[B] {STRATEGY_B['short_name']}\n"
@@ -1009,6 +1041,13 @@ def start_bot():
                 f"Leader : {lead}\n"
                 f"Time   : {ist_now()}"
             )
+
+            if hourly_message_id is None:
+                hourly_message_id = send_alert(hourly_msg)
+            else:
+                edited = edit_alert(hourly_message_id, hourly_msg)
+                if not edited:
+                    hourly_message_id = send_alert(hourly_msg)
 
         elapsed    = time.time() - cycle_start
         sleep_secs = max(5.0, seconds_until_next_5min() - elapsed)
